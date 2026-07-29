@@ -12,8 +12,8 @@
 
 set -eu
 
-GITSYNC_VERSION="0.1.0"
-GITSYNC_LABEL="com.user.syncto"
+SYNCTO_VERSION="0.1.0"
+SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
 # paths
@@ -465,12 +465,12 @@ trap 'lock_release; exit 1' INT TERM HUP
 run_hook() {
     (
         cd "$2" 2>/dev/null || exit 127
-        GITSYNC_NAME=$3
-        GITSYNC_PATH=$2
-        GITSYNC_MESSAGE=$4
-        GITSYNC_BRANCH=${t_branch:-}
-        GITSYNC_REMOTE=${t_remote:-}
-        export GITSYNC_NAME GITSYNC_PATH GITSYNC_MESSAGE GITSYNC_BRANCH GITSYNC_REMOTE
+        SYNCTO_NAME=$3
+        SYNCTO_PATH=$2
+        SYNCTO_MESSAGE=$4
+        SYNCTO_BRANCH=${t_branch:-}
+        SYNCTO_REMOTE=${t_remote:-}
+        export SYNCTO_NAME SYNCTO_PATH SYNCTO_MESSAGE SYNCTO_BRANCH SYNCTO_REMOTE
         sh -c "$1" </dev/null 2>&1
     )
 }
@@ -1137,7 +1137,7 @@ render_template() {
     _rt=${_rt//@EXEC@/$_rt_exec}
     _rt=${_rt//@INTERVAL@/$G_INTERVAL}
     _rt=${_rt//@LOG@/$LOG_FILE}
-    _rt=${_rt//@LABEL@/$GITSYNC_LABEL}
+    _rt=${_rt//@LABEL@/$SYNCTO_LABEL}
     case "$_rt" in
         *@[A-Z]*@*) return 1 ;;
     esac
@@ -1156,20 +1156,20 @@ sched_argv() {
 }
 
 plist_path() {
-    printf '%s/Library/LaunchAgents/%s.plist' "$HOME" "$GITSYNC_LABEL"
+    printf '%s/Library/LaunchAgents/%s.plist' "$HOME" "$SYNCTO_LABEL"
 }
 
 install_launchd() {
     _il_plist=$(plist_path)
     mkdir -p "$HOME/Library/LaunchAgents" || die 1 "cannot create $HOME/Library/LaunchAgents"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
-    if ! render_template "$SELF_DIR/templates/$GITSYNC_LABEL.plist.in" >"$_il_plist" 2>/dev/null; then
+    if ! render_template "$SELF_DIR/templates/$SYNCTO_LABEL.plist.in" >"$_il_plist" 2>/dev/null; then
         {
             printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
             printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
             printf '%s\n' '<plist version="1.0">'
             printf '%s\n' '<dict>'
-            printf '    <key>Label</key>\n    <string>%s</string>\n' "$(xml_escape "$GITSYNC_LABEL")"
+            printf '    <key>Label</key>\n    <string>%s</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
             printf '    <key>ProgramArguments</key>\n    <array>\n'
             sched_argv | while IFS= read -r _il_a; do
                 printf '        <string>%s</string>\n' "$(xml_escape "$_il_a")"
@@ -1190,27 +1190,27 @@ install_launchd() {
     fi
 
     _il_uid=$(id -u)
-    launchctl bootout "gui/$_il_uid/$GITSYNC_LABEL" >/dev/null 2>&1 || :
+    launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL" >/dev/null 2>&1 || :
     if ! launchctl bootstrap "gui/$_il_uid" "$_il_plist" >/dev/null 2>&1; then
         # older launchctl
         launchctl unload "$_il_plist" >/dev/null 2>&1 || :
         launchctl load "$_il_plist" >/dev/null 2>&1 ||
             die 1 "wrote $_il_plist but launchctl refused to load it"
     fi
-    printf 'Installed launchd agent %s (every %ss)\n' "$GITSYNC_LABEL" "$G_INTERVAL"
+    printf 'Installed launchd agent %s (every %ss)\n' "$SYNCTO_LABEL" "$G_INTERVAL"
     printf '  unit: %s\n' "$(path_encode "$_il_plist")"
-    log info "" "installed launchd agent $GITSYNC_LABEL interval=$G_INTERVAL"
+    log info "" "installed launchd agent $SYNCTO_LABEL interval=$G_INTERVAL"
     return 0
 }
 
 uninstall_launchd() {
     _ul_plist=$(plist_path)
     _ul_uid=$(id -u)
-    launchctl bootout "gui/$_ul_uid/$GITSYNC_LABEL" >/dev/null 2>&1 ||
+    launchctl bootout "gui/$_ul_uid/$SYNCTO_LABEL" >/dev/null 2>&1 ||
         launchctl unload "$_ul_plist" >/dev/null 2>&1 || :
     if [ -f "$_ul_plist" ]; then
         rm -f "$_ul_plist" || die 1 "cannot remove $_ul_plist"
-        printf 'Removed launchd agent %s\n' "$GITSYNC_LABEL"
+        printf 'Removed launchd agent %s\n' "$SYNCTO_LABEL"
     else
         printf 'No launchd agent installed.\n'
     fi
@@ -1318,7 +1318,7 @@ cmd_uninstall_service() {
 
 usage() {
     cat <<EOF
-syncto $GITSYNC_VERSION — unattended git sync for working copies you care about
+syncto $SYNCTO_VERSION — unattended git sync for working copies you care about
 
 USAGE
   syncto [-v] [ACTION]
@@ -1349,8 +1349,8 @@ TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   notify=CMD            run when a sync stops on a conflict
   peer=CMD              run after a push that carried a new commit
 
-  Hooks run with the target as the working directory and with GITSYNC_NAME,
-  GITSYNC_PATH, GITSYNC_BRANCH, GITSYNC_REMOTE and GITSYNC_MESSAGE in the
+  Hooks run with the target as the working directory and with SYNCTO_NAME,
+  SYNCTO_PATH, SYNCTO_BRANCH, SYNCTO_REMOTE and SYNCTO_MESSAGE in the
   environment. guard and notify decide the run; peer is always best effort.
 
 FILES
@@ -1468,7 +1468,7 @@ main() {
             usage
             ;;
         -V|--version)
-            printf 'syncto %s\n' "$GITSYNC_VERSION"
+            printf 'syncto %s\n' "$SYNCTO_VERSION"
             ;;
         -*)
             warn "unknown option: $action"

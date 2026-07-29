@@ -127,6 +127,22 @@ running `syncto -s notes` will, in `~/notes`: `git add -A`; if anything was stag
 commit as `notes: <file>` or `notes: N files`; `git pull --rebase --autostash origin
 main`; `git push origin main`.
 
+### Hook environment
+
+`guard=`, `notify=` and `peer=` run via `sh -c`, with the working directory set to the
+target's repo, and these variables exported:
+
+| Variable | Value |
+|---|---|
+| `SYNCTO_NAME` | the target's name |
+| `SYNCTO_PATH` | absolute path to the repo |
+| `SYNCTO_MESSAGE` | the commit message just made, or the conflict message for `notify=` |
+| `SYNCTO_BRANCH` / `SYNCTO_REMOTE` | branch and remote in effect for this target |
+
+A hook's exit status only matters for `guard=` (non-zero skips the target this pass);
+`notify=` and `peer=` are best-effort and can never fail a sync. If a hook value needs a
+literal comma, escape it as `\,`.
+
 ## Scheduling
 
 `syncto --daemon` runs exactly one pass over every due target and exits — it's meant to
