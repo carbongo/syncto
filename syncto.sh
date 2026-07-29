@@ -1147,9 +1147,17 @@ render_template() {
 
 # Print the ProgramArguments / ExecStart words, one per line: an executable entry
 # point runs directly, anything else goes through bash.
+#
+# macOS is the exception: always go through $SHELL_BIN explicitly. macOS TCC grants
+# file access (Full Disk Access, and the per-folder Documents/Desktop grants) to the
+# *binary the scheduler exec'd*. Exec the script directly and the responsible process
+# is the script itself, which holds no grant — so a launchd job silently reads a
+# protected folder, such as an iCloud Drive path, as empty or missing. Naming
+# /bin/bash keeps the grant on a stable, always-present binary the user can add once
+# in System Settings > Privacy & Security > Full Disk Access.
 sched_argv() {
     _sa_exec=$(sched_exec)
-    if [ ! -x "$_sa_exec" ]; then
+    if [ ! -x "$_sa_exec" ] || [ "$(uname -s)" = "Darwin" ]; then
         printf '%s\n' "$SHELL_BIN"
     fi
     printf '%s\n-d\n' "$_sa_exec"

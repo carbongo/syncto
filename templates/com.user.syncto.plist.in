@@ -24,8 +24,13 @@
 <dict>
     <key>Label</key>
     <string>com.user.syncto</string>
+    <!-- @EXEC@ is invoked through /bin/bash on purpose: macOS TCC attaches file-access
+         grants (Full Disk Access etc.) to the binary launchd exec'd. Running the script
+         directly makes the script the responsible process, which holds no grant, and a
+         protected folder such as an iCloud Drive path then reads as empty. -->
     <key>ProgramArguments</key>
     <array>
+        <string>/bin/bash</string>
         <string>@EXEC@</string>
         <string>-d</string>
     </array>

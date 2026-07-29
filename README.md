@@ -161,6 +161,20 @@ pulls over SSH, set a passphrase-less key for it via `key=<path>` (or a full
 real, tested failure mode, not a hypothetical: a scheduled sync that needs to type a
 passphrase simply never succeeds, silently.
 
+### macOS: protected folders
+
+If a target lives somewhere macOS protects — iCloud Drive, `~/Documents`, `~/Desktop` —
+a scheduled sync needs Full Disk Access, and the grant attaches to the **binary launchd
+executed**, not to `syncto`. The installed agent therefore runs `/bin/bash <path> -d`, so
+the grant you need is on `/bin/bash`: System Settings → Privacy & Security → Full Disk
+Access → add `/bin/bash`.
+
+Without it the symptom is quiet and confusing rather than a permission error: the folder
+reads back as empty, so `syncto` reports `not a git working tree` and refuses the target.
+It will not stage a protected folder it cannot see — a mass deletion is not a way this
+can fail. Manual `syncto --sync` from your terminal works regardless, because your
+terminal has its own grant; only the scheduled path needs this.
+
 ## Watch mode
 
 `syncto --watch [name]` runs in the foreground and syncs a target as soon as its files
