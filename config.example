@@ -1,43 +1,11 @@
-# gitsync example configuration
+# gitsync example global config
 #
-# There are two separate files, both under ${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/:
+# Copy to ${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/config. These are the defaults
+# every target falls back to when its own options column doesn't override them.
+# The list of repos to sync lives in a separate file — see targets.example.
+# Nothing in this repo is read at runtime; real config lives outside it.
 #
-#   config   — global defaults, key=value lines (this file's second half)
-#   targets  — one repo to sync per line, TSV (this file's first half)
-#
-# This file shows both formats side by side with comments; split it into the two real
-# files at the paths above and delete the parts that don't apply, or copy each section
-# into place. Real config lives OUTSIDE this repo — nothing here is read at runtime.
-
-# ============================================================================
-# targets — TSV: name<TAB>path<TAB>options
-#
-#   - Fields are tab-separated. Keep exactly one target per line.
-#   - `path` MUST have $HOME written literally as `~` (not expanded), so the same file
-#     works unmodified across machines/usernames. gitsync expands it at read time.
-#   - `options` is a comma-separated list of key=value pairs. Every key is optional;
-#     omitted keys fall back to the global config's defaults.
-#
-# Recognized option keys:
-#   interval=<seconds>          how often the daemon/scheduler syncs this target
-#   watch=on|off                also sync on file-change, not just on schedule
-#   mode=sync|push|pull         sync = pull+push (default), push/pull = one-way only
-#   branch=<name>                override the global default branch
-#   remote=<name>                override the global default remote
-#   prefix=<commit msg prefix>   e.g. "notes (laptop)" -> "notes (laptop): file.md"
-#   guard=<shell cmd>            must exit 0 or this pass is skipped for this target
-#   notify=<shell cmd>           run on unresolvable conflict (exit 2), best-effort
-#   peer=<shell cmd>             run after a successful commit+push, best-effort
-#
-# Two example targets: a notes vault synced two-way with a guard and a conflict
-# notifier, and a dotfiles-style config repo that's pulled more often than pushed.
-
-notes	~/notes	interval=120,watch=on,prefix=notes (laptop),guard=test $(find ~/notes -maxdepth 1 -name '*.partial' | wc -l) -eq 0,notify=notify-send "gitsync conflict" "notes needs a human"
-dotfiles	~/dotfiles	interval=300,mode=sync,branch=main,remote=origin,prefix=dotfiles,peer=ssh -o ConnectTimeout=5 -o BatchMode=yes example-host "systemctl --user start gitsync.service"
-
-# ============================================================================
-# config — global defaults, key=value lines. Any target may override any of these
-# via its own options column; these are just the fallback when a target doesn't.
+# Format: key=value, one per line. Blank lines and #-comments are ignored.
 
 interval=120
 watch=off

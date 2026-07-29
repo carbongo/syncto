@@ -112,8 +112,9 @@ Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/`:
   `branch`, `remote`, `log` (defaults: `120`, `off`, `sync`, `main`, `origin`,
   `~/.local/state/gitsync/gitsync.log`).
 
-See [`config.example`](./config.example) for a fully commented, worked example of both
-files — copy the relevant half into place and edit it.
+See [`config.example`](./config.example) and [`targets.example`](./targets.example) for
+fully commented, worked examples of the two files — copy either into place and edit it.
+`install.sh` seeds `config` for you; targets are easiest to add with `gitsync --add`.
 
 Minimal worked example. Given:
 
