@@ -1,17 +1,17 @@
-# gitsync — agent entry point
+# syncto — agent entry point
 
 Unattended git auto-sync for one or more local repos: add, commit, rebase-pull, push,
 on an interval or a filesystem watch, per-target configurable. Pure shell, no build step.
 
 Facts:
-- Everything lives in `gitsync.sh` (bash 3.2 + bash 5 compatible — no associative arrays,
+- Everything lives in `syncto.sh` (bash 3.2 + bash 5 compatible — no associative arrays,
   no `${var^^}`, no `mapfile`, no `declare -A`; runs on macOS stock bash and Linux bash).
-- Install layout: script → `~/.local/share/gitsync/gitsync.sh`, entry point symlink/shim
-  → `~/.local/bin/gitsync` (on `$PATH`).
-- Targets config: `${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/targets` — TSV,
+- Install layout: script → `~/.local/share/syncto/syncto.sh`, entry point symlink/shim
+  → `~/.local/bin/syncto` (on `$PATH`).
+- Targets config: `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/targets` — TSV,
   `name<TAB>path<TAB>options`, `$HOME` stored as `~`. Global config:
-  `${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/config` — `key=value` lines.
-- CLI is flags, not subcommands (mirrors `cdto`): bare `gitsync` lists targets;
+  `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/config` — `key=value` lines.
+- CLI is flags, not subcommands (mirrors `cdto`): bare `syncto` lists targets;
   `-s/--sync`, `-a/--add`, `-r/--remove`, `-e/--edit`, `-w/--watch`, `-d/--daemon`,
   `-i/--install-service`, `-u/--uninstall-service`, `-L/--log`, `-v/--verbose`,
   `-h/--help`, `-V/--version`. See README for the full table.

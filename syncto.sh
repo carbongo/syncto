@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gitsync — unattended git sync for working copies you care about.
+# syncto — unattended git sync for working copies you care about.
 #
 # Single file, no dependencies beyond POSIX tools and git.
 # Must stay bash 3.2 compatible (macOS stock) and run unchanged under bash 5:
@@ -13,16 +13,16 @@
 set -eu
 
 GITSYNC_VERSION="0.1.0"
-GITSYNC_LABEL="com.user.gitsync"
+GITSYNC_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
 # paths
 # ---------------------------------------------------------------------------
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gitsync"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/syncto"
 TARGETS_FILE="$CONFIG_DIR/targets"
 CONFIG_FILE="$CONFIG_DIR/config"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/gitsync"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/syncto"
 LOCK_DIR="$STATE_DIR/locks"
 LAST_DIR="$STATE_DIR/last"
 
@@ -75,12 +75,12 @@ log() {
 }
 
 warn() {
-    printf 'gitsync: %s\n' "$1" >&2
+    printf 'syncto: %s\n' "$1" >&2
 }
 
 die() {
     # die CODE MESSAGE
-    printf 'gitsync: %s\n' "$2" >&2
+    printf 'syncto: %s\n' "$2" >&2
     exit "$1"
 }
 
@@ -218,13 +218,13 @@ G_WATCH=off
 G_MODE=sync
 G_BRANCH=main
 G_REMOTE=origin
-G_PREFIX=gitsync
+G_PREFIX=syncto
 G_GUARD=""
 G_NOTIFY=""
 G_PEER=""
 G_KEY=""
 G_SSH=""
-LOG_FILE="$STATE_DIR/gitsync.log"
+LOG_FILE="$STATE_DIR/syncto.log"
 
 load_config() {
     [ -f "$CONFIG_FILE" ] || return 0
@@ -617,7 +617,7 @@ sync_locked() {
             if [ -n "$t_notify" ]; then
                 _nout=""
                 _nrc=0
-                _nout=$(run_hook "$t_notify" "$path" "$name" "gitsync: $name needs attention: $(oneline "$_out")") || _nrc=$?
+                _nout=$(run_hook "$t_notify" "$path" "$name" "syncto: $name needs attention: $(oneline "$_out")") || _nrc=$?
                 if [ "$_nrc" -ne 0 ]; then
                     log warn "$name" "notify hook exited $_nrc: $_nout"
                 fi
@@ -676,7 +676,7 @@ last_run() {
 
 no_targets_notice() {
     printf 'No targets configured yet.\n' >&2
-    printf 'Add one with:  gitsync --add NAME PATH [key=value ...]\n' >&2
+    printf 'Add one with:  syncto --add NAME PATH [key=value ...]\n' >&2
 }
 
 cmd_sync() {
@@ -724,7 +724,7 @@ cmd_sync() {
         die 3 "no such target: $_cs_only"
     fi
     if [ -n "$_cs_conflicts" ]; then
-        printf 'gitsync: needs a human:%s\n' "$_cs_conflicts" >&2
+        printf 'syncto: needs a human:%s\n' "$_cs_conflicts" >&2
     fi
     return "$_cs_rc"
 }
@@ -828,7 +828,7 @@ ensure_targets_file() {
     if [ ! -f "$TARGETS_FILE" ]; then
         mkdir -p "$CONFIG_DIR" || die 3 "cannot create $CONFIG_DIR"
         {
-            printf '# gitsync targets\n'
+            printf '# syncto targets\n'
             printf '# NAME<TAB>PATH<TAB>OPTIONS   ($HOME is written as ~ so this file travels)\n'
             printf '# options: interval= watch= mode= branch= remote= prefix= guard= notify= peer=\n'
         } >"$TARGETS_FILE" || die 3 "cannot write $TARGETS_FILE"
@@ -839,8 +839,8 @@ ensure_targets_file() {
 cmd_add() {
     _ca_name=${1:-}
     _ca_path=${2:-}
-    [ -n "$_ca_name" ] || die 3 "usage: gitsync --add NAME PATH [key=value ...]"
-    [ -n "$_ca_path" ] || die 3 "usage: gitsync --add NAME PATH [key=value ...]"
+    [ -n "$_ca_name" ] || die 3 "usage: syncto --add NAME PATH [key=value ...]"
+    [ -n "$_ca_path" ] || die 3 "usage: syncto --add NAME PATH [key=value ...]"
     shift 2 || :
 
     case "$_ca_name" in
@@ -895,13 +895,13 @@ EOF
 
 cmd_remove() {
     _cr_name=${1:-}
-    [ -n "$_cr_name" ] || die 3 "usage: gitsync --remove NAME"
+    [ -n "$_cr_name" ] || die 3 "usage: syncto --remove NAME"
     [ -f "$TARGETS_FILE" ] || die 3 "no such target: $_cr_name"
 
     targets_load
     tg_index_of "$_cr_name" >/dev/null || die 3 "no such target: $_cr_name"
 
-    _cr_tmp=$(mktemp "${TMPDIR:-/tmp}/gitsync.XXXXXX") || die 1 "cannot create a temp file"
+    _cr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
     while IFS= read -r _cr_line || [ -n "$_cr_line" ]; do
         _cr_first=${_cr_line%%"$TAB"*}
         if [ "$_cr_first" = "$_cr_name" ] && [ "$_cr_first" != "$_cr_line" ]; then
@@ -926,7 +926,7 @@ cmd_edit() {
 
 cmd_log() {
     if [ ! -f "$LOG_FILE" ]; then
-        printf 'gitsync: no log yet at %s\n' "$(path_encode "$LOG_FILE")" >&2
+        printf 'syncto: no log yet at %s\n' "$(path_encode "$LOG_FILE")" >&2
         return 0
     fi
     tail -n 100 "$LOG_FILE"
@@ -1011,7 +1011,7 @@ cmd_watch() {
         if [ -n "${1:-}" ]; then
             die 3 "no such target: $1"
         fi
-        die 3 "no targets have watch=on; add one with 'gitsync --add NAME PATH watch=on'"
+        die 3 "no targets have watch=on; add one with 'syncto --add NAME PATH watch=on'"
     fi
 
     # Positional list of the paths to hand to the watcher binary.
@@ -1024,15 +1024,15 @@ cmd_watch() {
 
     if command -v fswatch >/dev/null 2>&1; then
         log info "" "watching ${W_COUNT} target(s) with fswatch"
-        printf 'gitsync: watching %s target(s) with fswatch — ctrl-c to stop\n' "$W_COUNT" >&2
+        printf 'syncto: watching %s target(s) with fswatch — ctrl-c to stop\n' "$W_COUNT" >&2
         watch_loop_fswatch "$@"
     elif command -v inotifywait >/dev/null 2>&1; then
         log info "" "watching ${W_COUNT} target(s) with inotifywait"
-        printf 'gitsync: watching %s target(s) with inotifywait — ctrl-c to stop\n' "$W_COUNT" >&2
+        printf 'syncto: watching %s target(s) with inotifywait — ctrl-c to stop\n' "$W_COUNT" >&2
         watch_loop_inotify "$@"
     else
         log info "" "watching ${W_COUNT} target(s) by polling"
-        printf 'gitsync: no fswatch/inotifywait found — polling every 2s — ctrl-c to stop\n' >&2
+        printf 'syncto: no fswatch/inotifywait found — polling every 2s — ctrl-c to stop\n' >&2
         watch_loop_poll
     fi
     return 0
@@ -1112,8 +1112,8 @@ SHELL_BIN="/bin/bash"
 # The command the scheduler should run. Prefer the installed entry point, which is
 # what the shipped unit templates document; fall back to this very file.
 sched_exec() {
-    if [ -x "$HOME/.local/bin/gitsync" ]; then
-        printf '%s' "$HOME/.local/bin/gitsync"
+    if [ -x "$HOME/.local/bin/syncto" ]; then
+        printf '%s' "$HOME/.local/bin/syncto"
     else
         printf '%s' "$SELF"
     fi
@@ -1222,16 +1222,16 @@ install_systemd() {
     mkdir -p "$_is_dir" || die 1 "cannot create $_is_dir"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
 
-    if ! render_template "$SELF_DIR/templates/gitsync.service.in" >"$_is_dir/gitsync.service" 2>/dev/null; then
+    if ! render_template "$SELF_DIR/templates/syncto.service.in" >"$_is_dir/syncto.service" 2>/dev/null; then
         _is_argv=""
         while IFS= read -r _is_a; do
             _is_argv="$_is_argv \"$_is_a\""
         done <<EOF
 $(sched_argv)
 EOF
-        cat >"$_is_dir/gitsync.service" <<EOF || die 1 "cannot write $_is_dir/gitsync.service"
+        cat >"$_is_dir/syncto.service" <<EOF || die 1 "cannot write $_is_dir/syncto.service"
 [Unit]
-Description=gitsync scheduled sync pass
+Description=syncto scheduled sync pass
 After=network-online.target
 Wants=network-online.target
 
@@ -1241,10 +1241,10 @@ ExecStart=${_is_argv# }
 EOF
     fi
 
-    if ! render_template "$SELF_DIR/templates/gitsync.timer.in" >"$_is_dir/gitsync.timer" 2>/dev/null; then
-        cat >"$_is_dir/gitsync.timer" <<EOF || die 1 "cannot write $_is_dir/gitsync.timer"
+    if ! render_template "$SELF_DIR/templates/syncto.timer.in" >"$_is_dir/syncto.timer" 2>/dev/null; then
+        cat >"$_is_dir/syncto.timer" <<EOF || die 1 "cannot write $_is_dir/syncto.timer"
 [Unit]
-Description=gitsync scheduled sync timer
+Description=syncto scheduled sync timer
 
 [Timer]
 OnBootSec=1min
@@ -1258,10 +1258,10 @@ EOF
     fi
 
     systemctl --user daemon-reload >/dev/null 2>&1 || :
-    systemctl --user enable --now gitsync.timer >/dev/null 2>&1 ||
-        die 1 "wrote the units but 'systemctl --user enable --now gitsync.timer' failed"
-    printf 'Installed systemd user timer gitsync.timer (every %ss)\n' "$G_INTERVAL"
-    printf '  units: %s/gitsync.{service,timer}\n' "$(path_encode "$_is_dir")"
+    systemctl --user enable --now syncto.timer >/dev/null 2>&1 ||
+        die 1 "wrote the units but 'systemctl --user enable --now syncto.timer' failed"
+    printf 'Installed systemd user timer syncto.timer (every %ss)\n' "$G_INTERVAL"
+    printf '  units: %s/syncto.{service,timer}\n' "$(path_encode "$_is_dir")"
     log info "" "installed systemd user timer interval=$G_INTERVAL"
     return 0
 }
@@ -1269,10 +1269,10 @@ EOF
 uninstall_systemd() {
     _us_dir=$(systemd_dir)
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl --user disable --now gitsync.timer >/dev/null 2>&1 || :
+        systemctl --user disable --now syncto.timer >/dev/null 2>&1 || :
     fi
     _us_removed=0
-    for _us_f in "$_us_dir/gitsync.timer" "$_us_dir/gitsync.service"; do
+    for _us_f in "$_us_dir/syncto.timer" "$_us_dir/syncto.service"; do
         if [ -f "$_us_f" ]; then
             rm -f "$_us_f" || die 1 "cannot remove $_us_f"
             _us_removed=1
@@ -1282,7 +1282,7 @@ uninstall_systemd() {
         systemctl --user daemon-reload >/dev/null 2>&1 || :
     fi
     if [ "$_us_removed" -eq 1 ]; then
-        printf 'Removed systemd user timer gitsync.timer\n'
+        printf 'Removed systemd user timer syncto.timer\n'
     else
         printf 'No systemd user timer installed.\n'
     fi
@@ -1294,7 +1294,7 @@ cmd_install_service() {
     case "$(uname -s)" in
         Darwin) install_launchd ;;
         Linux) install_systemd ;;
-        *) die 1 "no scheduler support for $(uname -s); run 'gitsync --daemon' from cron" ;;
+        *) die 1 "no scheduler support for $(uname -s); run 'syncto --daemon' from cron" ;;
     esac
 }
 
@@ -1312,10 +1312,10 @@ cmd_uninstall_service() {
 
 usage() {
     cat <<EOF
-gitsync $GITSYNC_VERSION — unattended git sync for working copies you care about
+syncto $GITSYNC_VERSION — unattended git sync for working copies you care about
 
 USAGE
-  gitsync [-v] [ACTION]
+  syncto [-v] [ACTION]
 
 ACTIONS
   (no action)                   list every target with its status
@@ -1334,7 +1334,7 @@ ACTIONS
 
 TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   interval=SECONDS      minimum seconds between scheduled syncs   [$G_INTERVAL]
-  watch=on|off          include in a bare 'gitsync --watch'       [$G_WATCH]
+  watch=on|off          include in a bare 'syncto --watch'       [$G_WATCH]
   mode=sync|push|pull   commit+pull+push / commit+push / pull only [$G_MODE]
   branch=NAME           branch to pull and push                   [$G_BRANCH]
   remote=NAME           remote to pull and push                   [$G_REMOTE]
@@ -1369,10 +1369,10 @@ EXIT CODES
   4  another run holds the lock
 
 EXAMPLES
-  gitsync --add notes "\$HOME/notes" interval=300,watch=on,prefix=notes
-  gitsync --add site "\$HOME/site" mode=pull,branch=trunk
-  gitsync --sync notes
-  gitsync --install-service
+  syncto --add notes "\$HOME/notes" interval=300,watch=on,prefix=notes
+  syncto --add site "\$HOME/site" mode=pull,branch=trunk
+  syncto --sync notes
+  syncto --install-service
 EOF
 }
 
@@ -1462,16 +1462,16 @@ main() {
             usage
             ;;
         -V|--version)
-            printf 'gitsync %s\n' "$GITSYNC_VERSION"
+            printf 'syncto %s\n' "$GITSYNC_VERSION"
             ;;
         -*)
             warn "unknown option: $action"
-            printf "Try 'gitsync --help'.\n" >&2
+            printf "Try 'syncto --help'.\n" >&2
             return 1
             ;;
         *)
             warn "unknown action: $action"
-            printf "Try 'gitsync --help'.\n" >&2
+            printf "Try 'syncto --help'.\n" >&2
             return 1
             ;;
     esac

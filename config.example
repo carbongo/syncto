@@ -1,6 +1,6 @@
-# gitsync example global config
+# syncto example global config
 #
-# Copy to ${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/config. These are the defaults
+# Copy to ${XDG_CONFIG_HOME:-$HOME/.config}/syncto/config. These are the defaults
 # every target falls back to when its own options column doesn't override them.
 # The list of repos to sync lives in a separate file — see targets.example.
 # Nothing in this repo is read at runtime; real config lives outside it.
@@ -12,7 +12,7 @@ watch=off
 mode=sync
 branch=main
 remote=origin
-log=~/.local/state/gitsync/gitsync.log
+log=~/.local/state/syncto/syncto.log
 
 # Optional: schedulers (launchd/systemd) run with no ssh-agent in scope. If a target
 # pushes/pulls over SSH, point git at a passphrase-less key explicitly instead of
@@ -20,7 +20,7 @@ log=~/.local/state/gitsync/gitsync.log
 #
 #   key=~/.ssh/example_deploy_key
 #
-# gitsync turns that into GIT_SSH_COMMAND="ssh -i ~/.ssh/example_deploy_key \
+# syncto turns that into GIT_SSH_COMMAND="ssh -i ~/.ssh/example_deploy_key \
 #   -o IdentitiesOnly=yes" for that target's git commands. You can also set
 # GIT_SSH_COMMAND directly here (or per-target) for full control, e.g. a nonstandard
 # port or a custom known_hosts file:

@@ -1,0 +1,24 @@
+# systemd --user service template for syncto (Linux).
+#
+# Consumed by `syncto --install-service`, which substitutes:
+#   @EXEC@   absolute path to the syncto entry point (installed to
+#            $HOME/.local/bin/syncto). Invoked with a trailing `-d`
+#            argument to run one scheduled pass.
+#
+# Pairs with syncto.timer, which triggers this unit on a schedule.
+# systemd --user services run WITHOUT an ssh-agent. If any target pushes
+# over ssh, set a `key=` option (or an equivalent GIT_SSH_COMMAND escape
+# hatch) in the syncto config for that target, so pushes don't hang.
+#
+# Installed to: ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/syncto.service
+# Install with: syncto --install-service
+# Remove with:  syncto --uninstall-service
+
+[Unit]
+Description=syncto scheduled sync pass
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@EXEC@ -d

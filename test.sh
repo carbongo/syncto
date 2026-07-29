@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# test.sh — test suite for gitsync.
+# test.sh — test suite for syncto.
 #
 # Every test runs inside its own mktemp -d sandbox with HOME and
 # XDG_CONFIG_HOME overridden, so the real user's config/repos/home are never
-# touched. Run under bash; targets bash 3.2 semantics in gitsync.sh itself.
+# touched. Run under bash; targets bash 3.2 semantics in syncto.sh itself.
 #
 # Usage: ./test.sh [-v]
 
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-GITSYNC="$HERE/gitsync.sh"
+SYNCTO="$HERE/syncto.sh"
 
 PASS=0
 FAIL=0
@@ -67,21 +67,21 @@ assert_status() {
 # and registers it for cleanup. Every test that touches config/git must call
 # this first and export HOME/XDG_CONFIG_HOME from its result.
 new_sandbox() {
-    _ns_dir=$(mktemp -d "${TMPDIR:-/tmp}/gitsync-test.XXXXXX")
+    _ns_dir=$(mktemp -d "${TMPDIR:-/tmp}/syncto-test.XXXXXX")
     SANDBOXES="$SANDBOXES $_ns_dir"
     printf '%s' "$_ns_dir"
 }
 
-# run_gitsync SANDBOX ARGS... — runs gitsync.sh with HOME/XDG_CONFIG_HOME/
+# run_syncto SANDBOX ARGS... — runs syncto.sh with HOME/XDG_CONFIG_HOME/
 # XDG_STATE_HOME pointed inside SANDBOX/home, output captured to global
 # OUT, exit code to global RC. Never touches the real user's env.
-run_gitsync() {
+run_syncto() {
     _rg_sandbox=$1
     shift
     OUT=$(HOME="$_rg_sandbox/home" \
           XDG_CONFIG_HOME="$_rg_sandbox/home/.config" \
           XDG_STATE_HOME="$_rg_sandbox/home/.local/state" \
-          "$GITSYNC" "$@" 2>&1)
+          "$SYNCTO" "$@" 2>&1)
     RC=$?
 }
 
@@ -104,10 +104,10 @@ test_config_roundtrip() {
     mkdir -p "$_t_target"
     git_q "$_t_target" init
 
-    run_gitsync "$_t_sb" --add proj "$_t_target" "interval=60,watch=on,prefix=proj"
+    run_syncto "$_t_sb" --add proj "$_t_target" "interval=60,watch=on,prefix=proj"
     assert_status "add: exit 0" 0 "$RC" "$OUT"
 
-    _targets_file="$_t_sb/home/.config/gitsync/targets"
+    _targets_file="$_t_sb/home/.config/syncto/targets"
     if [ -f "$_targets_file" ]; then
         ok "add: targets file created"
     else
@@ -127,7 +127,7 @@ $(cat "$_targets_file" 2>/dev/null)"
         fail "add: path stored as ~/myrepo" "$(cat "$_targets_file" 2>/dev/null)"
     fi
 
-    run_gitsync "$_t_sb"
+    run_syncto "$_t_sb"
     case "$OUT" in
         *proj*) ok "list: shows added target" ;;
         *) fail "list: shows added target" "$OUT" ;;
@@ -157,7 +157,7 @@ $(cat "$_targets_file" 2>/dev/null)"
         *) fail "options survive: prefix=proj present" "$_opts_line" ;;
     esac
 
-    run_gitsync "$_t_sb" --remove proj
+    run_syncto "$_t_sb" --remove proj
     assert_status "remove: exit 0" 0 "$RC" "$OUT"
 
     if grep -Fq "$(printf 'proj\t')" "$_targets_file" 2>/dev/null; then
@@ -166,7 +166,7 @@ $(cat "$_targets_file" 2>/dev/null)"
         ok "remove: target gone from targets file"
     fi
 
-    run_gitsync "$_t_sb"
+    run_syncto "$_t_sb"
     case "$OUT" in
         *"No targets"*) ok "list: empty after remove" ;;
         *) fail "list: empty after remove" "$OUT" ;;
@@ -198,12 +198,12 @@ test_sync_basic() {
     git_q "$_t_work" commit --allow-empty -m init
     git_q "$_t_work" push origin main
 
-    run_gitsync "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t"
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t"
     assert_status "sync-basic: add exit 0" 0 "$RC" "$OUT"
 
     # new file committed and pushed
     printf 'hello\n' >"$_t_work/newfile.txt"
-    run_gitsync "$_t_sb" --sync work
+    run_syncto "$_t_sb" --sync work
     assert_status "sync-basic: sync of new file exits 0" 0 "$RC" "$OUT"
 
     _last_msg=$(git -C "$_t_work" log -1 --pretty=%s)
@@ -218,7 +218,7 @@ test_sync_basic() {
 
     # no-op run when nothing changed
     _head_before=$(git -C "$_t_work" rev-parse HEAD)
-    run_gitsync "$_t_sb" --sync work
+    run_syncto "$_t_sb" --sync work
     assert_status "sync-basic: no-op run exits 0" 0 "$RC" "$OUT"
     _head_after=$(git -C "$_t_work" rev-parse HEAD)
     assert_eq "sync-basic: no-op run makes no new commit" "$_head_before" "$_head_after"
@@ -233,7 +233,7 @@ test_sync_basic() {
     git_q "$_t_other" commit -m "other machine change"
     git_q "$_t_other" push origin main
 
-    run_gitsync "$_t_sb" --sync work
+    run_syncto "$_t_sb" --sync work
     assert_status "sync-basic: pulling a remote change exits 0" 0 "$RC" "$OUT"
 
     if [ -f "$_t_work/other.txt" ]; then
@@ -274,13 +274,13 @@ test_conflict() {
     git_q "$_t_other" push origin main
 
     # Now make a conflicting local change in the primary clone, uncommitted,
-    # so gitsync's own commit step will produce a colliding commit on push/pull.
+    # so syncto's own commit step will produce a colliding commit on push/pull.
     printf 'line1-changed-locally\n' >"$_t_work/conflict.txt"
 
-    run_gitsync "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t"
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t"
     RC_ADD=$RC
 
-    run_gitsync "$_t_sb" --sync work
+    run_syncto "$_t_sb" --sync work
     assert_status "conflict: sync exits 2" 2 "$RC" "$OUT"
 
     _gitdir="$_t_work/.git"
@@ -316,13 +316,13 @@ test_locking() {
     git_q "$_t_work" config user.name Test
     git_q "$_t_work" commit --allow-empty -m init
 
-    run_gitsync "$_t_sb" --add work "$_t_work" "branch=main,mode=push,interval=60"
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,mode=push,interval=60"
 
-    _lock_dir="$_t_sb/home/.local/state/gitsync/locks/work.lock"
+    _lock_dir="$_t_sb/home/.local/state/syncto/locks/work.lock"
     mkdir -p "$_lock_dir"
     printf '999999 %s\n' "$(date +%s)" >"$_lock_dir/owner"
 
-    run_gitsync "$_t_sb" --sync work
+    run_syncto "$_t_sb" --sync work
     assert_status "locking: held lock makes sync exit 4" 4 "$RC" "$OUT"
 
     rm -rf "$_lock_dir"
@@ -343,12 +343,12 @@ test_guard() {
     git_q "$_t_work" config user.name Test
     git_q "$_t_work" commit --allow-empty -m init
 
-    run_gitsync "$_t_sb" --add work "$_t_work" "branch=main,mode=push,guard=exit 7"
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,mode=push,guard=exit 7"
 
     printf 'x\n' >"$_t_work/f.txt"
     _head_before=$(git -C "$_t_work" rev-parse HEAD)
 
-    run_gitsync "$_t_sb" --sync work
+    run_syncto "$_t_sb" --sync work
     assert_status "guard: skip still exits 0" 0 "$RC" "$OUT"
 
     _head_after=$(git -C "$_t_work" rev-parse HEAD)
@@ -363,28 +363,28 @@ test_help_version_unknown() {
     _t_sb=$(new_sandbox)
     mkdir -p "$_t_sb/home"
 
-    run_gitsync "$_t_sb" --help
+    run_syncto "$_t_sb" --help
     assert_status "help: exits 0" 0 "$RC" "$OUT"
     case "$OUT" in
-        *"gitsync"*"USAGE"*|*"USAGE"*) ok "help: prints usage text" ;;
+        *"syncto"*"USAGE"*|*"USAGE"*) ok "help: prints usage text" ;;
         *) fail "help: prints usage text" "$OUT" ;;
     esac
 
-    run_gitsync "$_t_sb" --version
+    run_syncto "$_t_sb" --version
     assert_status "version: exits 0" 0 "$RC" "$OUT"
     case "$OUT" in
-        gitsync\ *) ok "version: prints a version string" ;;
+        syncto\ *) ok "version: prints a version string" ;;
         *) fail "version: prints a version string" "$OUT" ;;
     esac
 
-    run_gitsync "$_t_sb" --this-flag-does-not-exist
+    run_syncto "$_t_sb" --this-flag-does-not-exist
     if [ "$RC" -eq 0 ]; then
         fail "unknown flag: exits non-zero" "exit 0"
     else
         ok "unknown flag: exits non-zero"
     fi
     case "$OUT" in
-        *"gitsync --help"*|*sage*) ok "unknown flag: prints a usage hint" ;;
+        *"syncto --help"*|*sage*) ok "unknown flag: prints a usage hint" ;;
         *) fail "unknown flag: prints a usage hint" "$OUT" ;;
     esac
 }
@@ -407,11 +407,11 @@ test_spaces() {
     git_q "$_t_work" commit --allow-empty -m init
     git_q "$_t_work" push origin main
 
-    run_gitsync "$_t_sb" --add "spacey" "$_t_work" "branch=main,remote=origin,prefix=t"
+    run_syncto "$_t_sb" --add "spacey" "$_t_work" "branch=main,remote=origin,prefix=t"
     assert_status "spaces: add exits 0" 0 "$RC" "$OUT"
 
     printf 'y\n' >"$_t_work/a file.txt"
-    run_gitsync "$_t_sb" --sync spacey
+    run_syncto "$_t_sb" --sync spacey
     assert_status "spaces: sync of a spacey path exits 0" 0 "$RC" "$OUT"
 
     _local_head=$(git -C "$_t_work" rev-parse main)

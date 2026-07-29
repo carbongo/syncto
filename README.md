@@ -1,4 +1,4 @@
-# gitsync
+# syncto
 
 Unattended git auto-sync for your own repos. Point it at a directory that's a git
 checkout, and it keeps that directory and its remote in sync on a schedule (or on file
@@ -10,7 +10,7 @@ needs a human, instead of guessing.
 If you keep a notes vault, a dotfiles repo, or any small personal repo checked out on
 more than one machine, you've done this dance: edit on machine A, forget to push; open
 machine B, forget to pull first; now you have a conflict, or worse, silently diverging
-history you don't notice for a week. `gitsync` automates the safe, repetitive part of
+history you don't notice for a week. `syncto` automates the safe, repetitive part of
 that loop (add → commit → pull --rebase → push) on an interval or on save, for as many
 repos as you want, each with its own settings — and it refuses to auto-resolve a real
 conflict. It aborts, leaves your repo exactly as it was, and runs a notification hook
@@ -23,11 +23,11 @@ predictably.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/PLACEHOLDER_USER/gitsync/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/carbongo/syncto/main/install.sh | sh
 ```
 
-This copies the tool to `~/.local/share/gitsync/gitsync.sh` and installs the `gitsync`
-entry point on your `$PATH` at `~/.local/bin/gitsync` (make sure that directory is on
+This copies the tool to `~/.local/share/syncto/syncto.sh` and installs the `syncto`
+entry point on your `$PATH` at `~/.local/bin/syncto` (make sure that directory is on
 your `$PATH` — most shells' default rc files already add it). The installer is
 idempotent: run it again any time to update in place.
 
@@ -39,16 +39,16 @@ improve watch mode (see below).
 
 ```sh
 # Register a repo you already have checked out
-gitsync --add notes ~/notes
+syncto --add notes ~/notes
 
 # Sync it once, right now
-gitsync --sync notes
+syncto --sync notes
 
 # See all your targets and their last-sync status
-gitsync
+syncto
 
 # Let it run in the background on your machine's scheduler
-gitsync --install-service
+syncto --install-service
 ```
 
 That's it — `notes` now syncs itself every 120 seconds (the default interval) once the
@@ -57,7 +57,7 @@ sensible commit messages generated automatically.
 
 ## CLI reference
 
-Flags, not subcommands — bare `gitsync` is the default (list) action, matching the style
+Flags, not subcommands — bare `syncto` is the default (list) action, matching the style
 of tools like `cdto`.
 
 | Flag | Long form | Action |
@@ -79,21 +79,21 @@ of tools like `cdto`.
 Examples:
 
 ```sh
-gitsync -a dotfiles ~/dotfiles mode=sync,interval=300,branch=main
-gitsync -s dotfiles          # sync just that target
-gitsync -s                   # sync every target
-gitsync -r dotfiles          # stop tracking it (does not touch the repo itself)
-gitsync -w notes             # watch just `notes` in the foreground
-gitsync -L                   # tail the log
+syncto -a dotfiles ~/dotfiles mode=sync,interval=300,branch=main
+syncto -s dotfiles          # sync just that target
+syncto -s                   # sync every target
+syncto -r dotfiles          # stop tracking it (does not touch the repo itself)
+syncto -w notes             # watch just `notes` in the foreground
+syncto -L                   # tail the log
 ```
 
 ## Configuration
 
-Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/`:
+Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/`:
 
 - **`targets`** — one repo per line, tab-separated: `name<TAB>path<TAB>options`. `path`
   stores `$HOME` literally as `~` so the file is portable across machines and usernames;
-  `gitsync` expands it when it reads the file. `options` is a comma-separated list of
+  `syncto` expands it when it reads the file. `options` is a comma-separated list of
   `key=value` pairs, all optional:
 
   | Key | Meaning | Default |
@@ -110,35 +110,35 @@ Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/`:
 
 - **`config`** — global defaults, `key=value` lines: `interval`, `watch`, `mode`,
   `branch`, `remote`, `log` (defaults: `120`, `off`, `sync`, `main`, `origin`,
-  `~/.local/state/gitsync/gitsync.log`).
+  `~/.local/state/syncto/syncto.log`).
 
 See [`config.example`](./config.example) and [`targets.example`](./targets.example) for
 fully commented, worked examples of the two files — copy either into place and edit it.
-`install.sh` seeds `config` for you; targets are easiest to add with `gitsync --add`.
+`install.sh` seeds `config` for you; targets are easiest to add with `syncto --add`.
 
 Minimal worked example. Given:
 
 ```
-# ~/.config/gitsync/targets
+# ~/.config/syncto/targets
 notes	~/notes	interval=60,watch=on,prefix=notes
 ```
 
-running `gitsync -s notes` will, in `~/notes`: `git add -A`; if anything was staged,
+running `syncto -s notes` will, in `~/notes`: `git add -A`; if anything was staged,
 commit as `notes: <file>` or `notes: N files`; `git pull --rebase --autostash origin
 main`; `git push origin main`.
 
 ## Scheduling
 
-`gitsync --daemon` runs exactly one pass over every due target and exits — it's meant to
-be invoked repeatedly by your OS's scheduler, not left running itself. `gitsync
+`syncto --daemon` runs exactly one pass over every due target and exits — it's meant to
+be invoked repeatedly by your OS's scheduler, not left running itself. `syncto
 --install-service` sets that scheduler up for you:
 
 - **macOS (launchd):** installs a `LaunchAgent` plist under `~/Library/LaunchAgents/`
-  that runs `gitsync --daemon` on an interval and at login.
+  that runs `syncto --daemon` on an interval and at login.
 - **Linux (systemd):** installs a user timer + oneshot service under
   `~/.config/systemd/user/` and enables it (`systemctl --user enable --now`).
 
-`gitsync --uninstall-service` reverses whichever of the two applies to the current
+`syncto --uninstall-service` reverses whichever of the two applies to the current
 platform. Both scheduler types run **without an `ssh-agent`** — if a target pushes or
 pulls over SSH, set a passphrase-less key for it via `key=<path>` (or a full
 `GIT_SSH_COMMAND=`) in `config` or the target's options; see `config.example`. This is a
@@ -147,7 +147,7 @@ passphrase simply never succeeds, silently.
 
 ## Watch mode
 
-`gitsync --watch [name]` runs in the foreground and syncs a target as soon as its files
+`syncto --watch [name]` runs in the foreground and syncs a target as soon as its files
 change, instead of waiting for the next scheduled interval. It picks the best available
 watcher automatically:
 
@@ -172,7 +172,7 @@ launch (or delegate to) a watcher for that target, in addition to its regular in
 
 On a `2`, your repo is left exactly as it was before the sync attempt (`git rebase
 --abort` was run for you) and the target's `notify=` hook, if set, has already fired.
-Resolve the conflict by hand in the repo, the normal way, then re-run `gitsync -s
+Resolve the conflict by hand in the repo, the normal way, then re-run `syncto -s
 <name>`.
 
 ## Design notes

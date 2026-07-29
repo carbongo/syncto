@@ -5,13 +5,13 @@
 Keeping a handful of personal git repos (notes vaults, config repos, small local
 projects) in sync across machines by hand is error-prone: forgetting to pull before you
 edit, forgetting to push after, or editing the same file on two machines and only
-noticing when a `push` is rejected. `gitsync` automates the boring, safe 90% of that
+noticing when a `push` is rejected. `syncto` automates the boring, safe 90% of that
 loop — add/commit/pull/push on a schedule or on file-change — and refuses to guess on
 the dangerous 10% (a real merge conflict), where it stops and asks a human instead.
 
 It replaced two hand-written, machine-specific scripts (a launchd-driven one and a
 systemd-driven one) that did the same job for one repo each, with copy-pasted logic and
-no shared config format. `gitsync` generalizes that logic into one tool that manages any
+no shared config format. `syncto` generalizes that logic into one tool that manages any
 number of targets, each with its own path, remote, branch, interval, and hooks.
 
 ## The sync algorithm, step by step
@@ -59,12 +59,12 @@ overriding.
 ## Conflict policy: abort and notify, never auto-resolve
 
 If the rebase in step 5 fails — a real conflict, not something git can reconcile on its
-own — `gitsync` runs `git rebase --abort`, restoring the repo to exactly the state it
+own — `syncto` runs `git rebase --abort`, restoring the repo to exactly the state it
 was in before the pull attempt (including the autostash pop), runs the target's
 `notify=<shell cmd>` hook if one is set, and exits 2 (the dedicated "needs a human"
 exit code, distinct from a generic error).
 
-This is a hard rule, not a default that more code could someday override: `gitsync`
+This is a hard rule, not a default that more code could someday override: `syncto`
 never guesses which side of a conflict is "right". Silent auto-resolution (`-X ours`,
 "take theirs", merge-and-hope) can silently discard real work, and the failure mode is
 invisible until much later. A human looking at the actual conflicting hunks is the only
@@ -90,7 +90,7 @@ macOS ships BSD versions of these tools that reject the GNU-only forms outright.
 ## Watcher fallback chain
 
 Watch mode needs to notice a file changed without polling expensively. Neither of the
-two reference machines ship a file-watcher binary out of the box, so `gitsync` degrades
+two reference machines ship a file-watcher binary out of the box, so `syncto` degrades
 gracefully rather than hard-requiring one:
 
 1. `fswatch`, if installed — efficient, cross-platform (macOS/Linux), the preferred path.
@@ -107,7 +107,7 @@ file.
 
 ## Security posture
 
-- `gitsync` never commits secrets. It has no notion of what a "secret" is; it commits
+- `syncto` never commits secrets. It has no notion of what a "secret" is; it commits
   whatever is in the working tree, so keeping tokens and credentials out of a synced
   repo (or `.gitignore`-ing them) is the user's responsibility, same as with git itself.
 - The tool's own config (`targets`, `config`, and anything a `guard=`/`notify=`/`peer=`
@@ -123,6 +123,6 @@ file.
   passphrase-less key — restrict it to the narrowest scope you can (a deploy key with
   push access to one repo beats a general-purpose personal key).
 - Notification and peer-wake hooks (`notify=`, `peer=`) are opaque shell commands
-  supplied by the user in their own config; `gitsync` has no built-in integration with
+  supplied by the user in their own config; `syncto` has no built-in integration with
   any specific chat/notification service, so no service-specific wiring or credentials
   live in this repo.

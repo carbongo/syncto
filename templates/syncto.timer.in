@@ -1,0 +1,25 @@
+# systemd --user timer template for syncto (Linux).
+#
+# Consumed by `syncto --install-service`, which substitutes:
+#   @INTERVAL@   seconds between scheduled passes (OnUnitActiveSec)
+#
+# Pairs with syncto.service. systemd --user timers run WITHOUT an
+# ssh-agent. If any target pushes over ssh, set a `key=` option (or an
+# equivalent GIT_SSH_COMMAND escape hatch) in the syncto config for that
+# target, so pushes don't hang waiting for a passphrase prompt.
+#
+# Installed to: ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/syncto.timer
+# Install with: syncto --install-service
+# Remove with:  syncto --uninstall-service
+
+[Unit]
+Description=syncto scheduled sync timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=@INTERVAL@s
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
