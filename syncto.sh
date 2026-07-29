@@ -746,7 +746,13 @@ cmd_daemon() {
         resolve_opts "$(tg_opts "$_cd_i")"
         _cd_last=$(last_run "$_cd_name")
         _cd_age=$((_cd_now - _cd_last))
-        if [ "$_cd_last" -gt 0 ] && [ "$_cd_age" -lt "$t_interval" ]; then
+        # Grace window: a scheduler firing every N seconds drifts by a second or two,
+        # so an interval of exactly N would skip every other pass and halve the real
+        # sync rate. Treat "nearly due" as due. 10% of the interval, clamped to 5..30s.
+        _cd_slack=$((t_interval / 10))
+        [ "$_cd_slack" -lt 5 ] && _cd_slack=5
+        [ "$_cd_slack" -gt 30 ] && _cd_slack=30
+        if [ "$_cd_last" -gt 0 ] && [ "$_cd_age" -lt $((t_interval - _cd_slack)) ]; then
             log info "$_cd_name" "skipped, last run ${_cd_age}s ago (interval ${t_interval}s)"
             _cd_i=$((_cd_i + 1))
             continue
