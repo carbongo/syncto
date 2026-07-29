@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent template for gitsync (macOS).
+
+  Consumed by `gitsync --install-service`, which substitutes:
+    @EXEC@      absolute path to the gitsync entry point (installed to
+                $HOME/.local/bin/gitsync). It is invoked with a trailing
+                `-d` argument to run one scheduled pass.
+    @INTERVAL@  seconds between scheduled passes (StartInterval)
+    @LOG@       absolute path to the gitsync log file, used for both
+                StandardOutPath and StandardErrorPath
+
+  launchd agents run WITHOUT an ssh-agent. If any target pushes over ssh,
+  set a `key=` option (or an equivalent GIT_SSH_COMMAND escape hatch) in
+  the gitsync config for that target, so pushes don't hang waiting for a
+  passphrase prompt that will never come.
+
+  Installed to: ~/Library/LaunchAgents/com.user.gitsync.plist
+  Install with: gitsync --install-service
+  Remove with:  gitsync --uninstall-service
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.gitsync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@EXEC@</string>
+        <string>-d</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>@INTERVAL@</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@LOG@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG@</string>
+</dict>
+</plist>
