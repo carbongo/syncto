@@ -1,0 +1,60 @@
+# gitsync example configuration
+#
+# There are two separate files, both under ${XDG_CONFIG_HOME:-$HOME/.config}/gitsync/:
+#
+#   config   — global defaults, key=value lines (this file's second half)
+#   targets  — one repo to sync per line, TSV (this file's first half)
+#
+# This file shows both formats side by side with comments; split it into the two real
+# files at the paths above and delete the parts that don't apply, or copy each section
+# into place. Real config lives OUTSIDE this repo — nothing here is read at runtime.
+
+# ============================================================================
+# targets — TSV: name<TAB>path<TAB>options
+#
+#   - Fields are tab-separated. Keep exactly one target per line.
+#   - `path` MUST have $HOME written literally as `~` (not expanded), so the same file
+#     works unmodified across machines/usernames. gitsync expands it at read time.
+#   - `options` is a comma-separated list of key=value pairs. Every key is optional;
+#     omitted keys fall back to the global config's defaults.
+#
+# Recognized option keys:
+#   interval=<seconds>          how often the daemon/scheduler syncs this target
+#   watch=on|off                also sync on file-change, not just on schedule
+#   mode=sync|push|pull         sync = pull+push (default), push/pull = one-way only
+#   branch=<name>                override the global default branch
+#   remote=<name>                override the global default remote
+#   prefix=<commit msg prefix>   e.g. "notes (laptop)" -> "notes (laptop): file.md"
+#   guard=<shell cmd>            must exit 0 or this pass is skipped for this target
+#   notify=<shell cmd>           run on unresolvable conflict (exit 2), best-effort
+#   peer=<shell cmd>             run after a successful commit+push, best-effort
+#
+# Two example targets: a notes vault synced two-way with a guard and a conflict
+# notifier, and a dotfiles-style config repo that's pulled more often than pushed.
+
+notes	~/notes	interval=120,watch=on,prefix=notes (laptop),guard=test $(find ~/notes -maxdepth 1 -name '*.partial' | wc -l) -eq 0,notify=notify-send "gitsync conflict" "notes needs a human"
+dotfiles	~/dotfiles	interval=300,mode=sync,branch=main,remote=origin,prefix=dotfiles,peer=ssh -o ConnectTimeout=5 -o BatchMode=yes example-host "systemctl --user start gitsync.service"
+
+# ============================================================================
+# config — global defaults, key=value lines. Any target may override any of these
+# via its own options column; these are just the fallback when a target doesn't.
+
+interval=120
+watch=off
+mode=sync
+branch=main
+remote=origin
+log=~/.local/state/gitsync/gitsync.log
+
+# Optional: schedulers (launchd/systemd) run with no ssh-agent in scope. If a target
+# pushes/pulls over SSH, point git at a passphrase-less key explicitly instead of
+# relying on an agent that won't be there:
+#
+#   key=~/.ssh/example_deploy_key
+#
+# gitsync turns that into GIT_SSH_COMMAND="ssh -i ~/.ssh/example_deploy_key \
+#   -o IdentitiesOnly=yes" for that target's git commands. You can also set
+# GIT_SSH_COMMAND directly here (or per-target) for full control, e.g. a nonstandard
+# port or a custom known_hosts file:
+#
+#   GIT_SSH_COMMAND=ssh -i ~/.ssh/example_deploy_key -o IdentitiesOnly=yes -p 2222

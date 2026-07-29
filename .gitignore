@@ -1,0 +1,13 @@
+# editor cruft
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# local state / logs (never ship real config or logs in the repo)
+*.log
+.local/
