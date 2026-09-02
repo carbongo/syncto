@@ -478,6 +478,19 @@ watch_fixture() {
         printf 'exit 0\n'
     } >"$_wf_sb/stub/inotifywait"
     chmod +x "$_wf_sb/stub/inotifywait"
+    # cmd_watch prefers fswatch and only falls back to inotifywait, so on any
+    # machine that actually has fswatch installed (every dev Mac) stubbing
+    # inotifywait alone leaves the real watcher running — it never exits, the
+    # pipe never closes, and the watch tests hang forever instead of failing.
+    # Stub both. fswatch is invoked with -0, so events are NUL-separated.
+    {
+        printf '#!/bin/sh\n'
+        for _wf_ev in "$@"; do
+            printf 'printf "%%s\\0" "%s"\n' "$_wf_ev"
+        done
+        printf 'exit 0\n'
+    } >"$_wf_sb/stub/fswatch"
+    chmod +x "$_wf_sb/stub/fswatch"
 }
 
 test_watch_ignores_git() {
