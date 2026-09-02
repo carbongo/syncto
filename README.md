@@ -195,6 +195,12 @@ All three paths debounce (`debounce=`, default 2 seconds) so a burst of saves tr
 one sync, not one per file. When several targets are watched by one process they share
 the largest debounce among them, so a patient target is never cut off mid-burst.
 
+A watch-triggered sync first checks that the tree is actually dirty. A watcher fires on
+any write under the repo, including paths git is told to ignore (editor scratch, trash
+folders, agent session files); syncing those would cost a network round trip to discover
+there was nothing to commit. Only the outbound direction is skipped — inbound changes
+still arrive via `peer=` and the interval.
+
 **`.git` is excluded from every watcher.** Syncing writes to `.git` — index, refs,
 `FETCH_HEAD`, reflogs — so counting those as changes would make each sync trigger the
 next one and the watcher would never go idle. The watcher binaries are told to exclude

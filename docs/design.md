@@ -139,6 +139,19 @@ build tool touching several files) triggers one sync, not one per file. The wind
 the largest debounce among them, so a target that wanted a patient window is never cut
 off early by a neighbour that wanted a tight one.
 
+### Ignored paths must not buy a network round trip
+
+A watcher reports writes, and git ignores a good share of them. A repo with a trash
+folder, an editor's scratch files, or an agent's session directory in `.gitignore`
+generates a steady drip of events that stage nothing. Handing each of those to the full
+sync path costs a fetch and a push to establish that there was nothing to say.
+
+So a watch-triggered sync probes `git status --porcelain` first and returns early on a
+clean tree. This is safe precisely because the watcher owns only the outbound direction:
+inbound changes arrive through `peer=` wakes and the interval backstop, and neither of
+those goes through the watch path. Skipping a watch event can therefore never mean
+missing someone else's work — only declining to announce a change that does not exist.
+
 ### `.git` must be excluded, or the watcher never sleeps
 
 A sync writes inside `.git`: the index, refs, `FETCH_HEAD`, reflogs. A watcher pointed at

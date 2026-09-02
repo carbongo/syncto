@@ -525,6 +525,31 @@ $OUT"
     fi
 }
 
+test_watch_skips_ignored() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    # The watcher announces the repo root, but the only thing that changed is a
+    # gitignored file — no sync, and above all no network round trip.
+    watch_fixture "$_t_sb" "$_t_sb/home/work"
+
+    printf 'scratch/\n' >"$_t_work/.gitignore"
+    git_q "$_t_work" add -A
+    git_q "$_t_work" commit -m ignore
+    git_q "$_t_work" push origin main
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+        "branch=main,remote=origin,prefix=t,watch=on,debounce=1"
+
+    mkdir -p "$_t_work/scratch"
+    printf 'noise\n' >"$_t_work/scratch/tmp.txt"
+    _before=$(git -C "$_t_work" rev-list --count main)
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    _after=$(git -C "$_t_work" rev-list --count main)
+
+    assert_eq "watch: an ignored-only change makes no commit" "$_before" "$_after" "$OUT"
+}
+
 # ---------------------------------------------------------------------------
 # 9. debounce option
 # ---------------------------------------------------------------------------
@@ -565,6 +590,7 @@ test_help_version_unknown
 test_spaces
 test_watch_ignores_git
 test_watch_syncs_real_edit
+test_watch_skips_ignored
 test_debounce_option
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

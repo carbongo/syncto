@@ -1133,6 +1133,19 @@ watch_flush() {
             eval "W_PEND_$_wf_i=0"
             _wf_idx=$(w_idx "$_wf_i")
             _wf_name=$(tg_name "$_wf_idx")
+            # A watcher fires on any write under the repo, including paths git
+            # is told to ignore — editor scratch, trash folders, agent session
+            # files. Syncing those costs a full network round trip to discover
+            # there was nothing to commit, so ask git first: if the tree is
+            # clean, the write was ignored and there is nothing to do. Only the
+            # outbound direction is skipped; inbound still arrives via peer=
+            # wakes and the interval backstop, neither of which comes through
+            # here.
+            if [ -z "$(git -C "$(w_path "$_wf_i")" status --porcelain 2>/dev/null | head -n 1)" ]; then
+                log info "$_wf_name" "watch: only ignored paths changed, nothing to sync"
+                _wf_i=$((_wf_i + 1))
+                continue
+            fi
             _wf_one=0
             sync_one "$_wf_idx" || _wf_one=$?
             if [ "$_wf_one" -ne 4 ]; then
