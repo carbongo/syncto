@@ -590,6 +590,74 @@ test_debounce_option() {
     esac
 }
 
+test_dirty_tree_defers_pull() {
+    # A rebase rewrites files on disk, so it must never run while an editor has
+    # unsaved-and-resaved work in the tree. mode=pull makes this deterministic:
+    # nothing is committed, so a dirty tree is dirty when the pull is reached.
+    _t_sb=$(new_sandbox)
+    mkdir -p "$_t_sb/home"
+    _t_bare="$_t_sb/remote.git"
+    _t_work="$_t_sb/home/work"
+
+    git init --bare "$_t_bare" >/dev/null 2>&1
+    git -C "$_t_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
+    git -c init.defaultBranch=main clone "$_t_bare" "$_t_work" >/dev/null 2>&1
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" config user.email test@example.com
+    git_q "$_t_work" config user.name Test
+    printf 'first line\n' >"$_t_work/note.md"
+    git_q "$_t_work" add -A
+    git_q "$_t_work" commit -m init
+    git_q "$_t_work" push origin main
+
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t,mode=pull"
+    assert_status "dirty-pull: add exit 0" 0 "$RC" "$OUT"
+
+    # Another machine pushes something we would normally pull down.
+    _t_other="$_t_sb/other-clone"
+    git clone "$_t_bare" "$_t_other" >/dev/null 2>&1
+    git_q "$_t_other" config user.email test@example.com
+    git_q "$_t_other" config user.name Test
+    printf 'from elsewhere\n' >"$_t_other/other.txt"
+    git_q "$_t_other" add -A
+    git_q "$_t_other" commit -m "other machine change"
+    git_q "$_t_other" push origin main
+
+    # ...but we are mid-sentence in note.md.
+    printf 'first line\nhalf-typed parag\n' >"$_t_work/note.md"
+
+    run_syncto "$_t_sb" --sync work
+    assert_status "dirty-pull: a deferred pull is not an error" 0 "$RC" "$OUT"
+
+    if [ -f "$_t_work/other.txt" ]; then
+        fail "dirty-pull: pull deferred while the tree is dirty" "$OUT"
+    else
+        ok "dirty-pull: pull deferred while the tree is dirty"
+    fi
+
+    _t_body=$(cat "$_t_work/note.md")
+    assert_eq "dirty-pull: the file being edited is left untouched" \
+        "first line
+half-typed parag" "$_t_body"
+
+    case "$OUT$(cat "$_t_sb/home/.local/state/syncto/syncto.log" 2>/dev/null)" in
+        *"deferring the pull"*) ok "dirty-pull: the deferral is logged" ;;
+        *) fail "dirty-pull: the deferral is logged" "$OUT" ;;
+    esac
+
+    # Once the writing stops and the tree is clean, the pull goes through.
+    git_q "$_t_work" add -A
+    git_q "$_t_work" commit -m "done typing"
+    run_syncto "$_t_sb" --sync work
+    assert_status "dirty-pull: sync of a clean tree exits 0" 0 "$RC" "$OUT"
+
+    if [ -f "$_t_work/other.txt" ]; then
+        ok "dirty-pull: the remote change lands once the tree is clean"
+    else
+        fail "dirty-pull: the remote change lands once the tree is clean" "$OUT"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
@@ -605,6 +673,7 @@ test_watch_ignores_git
 test_watch_syncs_real_edit
 test_watch_skips_ignored
 test_debounce_option
+test_dirty_tree_defers_pull
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

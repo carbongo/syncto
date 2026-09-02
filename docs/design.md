@@ -32,10 +32,12 @@ For each target, in order:
    upstream changes to bring down.
 4. **Commit.** Message is `<prefix>: <basename>` when exactly one file changed, else
    `<prefix>: N files` — cheap, greppable, and never leaks full paths into history.
-5. **Pull.** `git pull --rebase --autostash <remote> <branch>`. `--autostash` protects
-   any uncommitted work that slipped in between steps 3 and 5; `--rebase` keeps history
-   linear instead of accumulating merge-bubble commits on every sync. See below for what
-   happens on failure.
+5. **Pull, into a clean tree only.** `git pull --rebase --no-autostash <remote>
+   <branch>`. `--rebase` keeps history linear instead of accumulating merge-bubble
+   commits on every sync. The tree is re-checked with `git status --porcelain`
+   immediately before the pull, and if writes landed since step 3 the pull is skipped
+   for this pass — see "Never rebase into a dirty tree" below. See further below for
+   what happens on failure.
 6. **Push.** `git push <remote> <branch>`, skipped entirely when the target is
    `mode=pull` (pull-only targets never write upstream).
 7. **Poke the peer, best-effort.** If step 4 produced a commit and `peer=<shell cmd>` is
@@ -56,11 +58,46 @@ reboot mid-sync), not to arbitrate between two live runs that happen to overlap.
 that's still alive well past 10 intervals is itself a bug worth surfacing, not silently
 overriding.
 
+## Never rebase into a dirty tree
+
+A rebase is not a metadata operation: git checks the upstream out and replays local
+commits on top, rewriting on disk every file whose content differs. When one of those
+files is open in an editor, the editor sees an external modification and reloads the
+buffer — which, in a live writing session, moves the caret out from under the person
+typing.
+
+`--autostash` makes this worse rather than better. Between the commit in step 4 and the
+rebase's own checkout there is a window of one network round trip (seconds, not
+milliseconds), and an editor that autosaves continuously — Obsidian is the motivating
+case — will write into it. `--autostash` then stashes the half-typed paragraph, rebases,
+and pops it back: no conflict is ever reported and no work is lost, but the file has been
+rewritten twice underneath the editor. The symptom is a cursor that jumps mid-sentence
+with nothing in the log to explain it.
+
+So the pull is guarded on both sides:
+
+- `git status --porcelain` is checked immediately before the pull. Dirty means skip the
+  pull for this pass, log it at `info`, and try again next time. Nothing is stashed,
+  nothing on disk is touched.
+- `--no-autostash` is passed explicitly, so a user-level `rebase.autoStash=true` cannot
+  reintroduce the behaviour. If the tree goes dirty in the remaining window, git refuses
+  the rebase rather than clobbering — that refusal is recognised by message and treated
+  as the same deferral, at `info`, not as a conflict worth paging a human over.
+
+The push still runs when a pull was deferred: it never touches the working tree, so
+local work reaches the remote promptly even mid-session. If the remote has meanwhile
+moved ahead, the resulting non-fast-forward rejection is the expected outcome of the
+deferral, logged at `info` and left for the next pass — not an error.
+
+The cost is bounded and one-directional: incoming changes arrive one pass later than
+they otherwise would. The alternative — rewriting files under a live editor — costs the
+user their place in the document, which is worse.
+
 ## Conflict policy: abort and notify, never auto-resolve
 
 If the rebase in step 5 fails — a real conflict, not something git can reconcile on its
 own — `syncto` runs `git rebase --abort`, restoring the repo to exactly the state it
-was in before the pull attempt (including the autostash pop), runs the target's
+was in before the pull attempt, runs the target's
 `notify=<shell cmd>` hook if one is set, and exits 2 (the dedicated "needs a human"
 exit code, distinct from a generic error).
 

@@ -646,6 +646,7 @@ sync_locked() {
     fi
 
     _committed=0
+    _pull_skipped=0
     _rc=0
 
     # 3./4. stage and commit
@@ -680,11 +681,42 @@ sync_locked() {
         fi
     fi
 
-    # 5. pull --rebase --autostash
-    if [ "$t_mode" != "push" ]; then
+    # A rebase checks the upstream out and replays on top of it, rewriting on
+    # disk every file that differs — including the one an editor has open right
+    # now. With --autostash git will even stash a half-typed paragraph, rebase,
+    # and pop it back: the text survives, but the file is rewritten twice under
+    # the editor, which reloads the buffer and drops the caret somewhere else.
+    # An editor that autosaves continuously (Obsidian) makes that the common
+    # case, not the rare one. So the rule is: never rebase into a dirty tree.
+    # If writes landed between the commit above and here, defer the pull to the
+    # next pass — the push below is still safe, it never touches the tree.
+    if [ "$t_mode" != "push" ] && \
+       [ -n "$(git_in "$path" status --porcelain 2>/dev/null)" ]; then
+        log info "$name" "tree went dirty again, deferring the pull to the next pass"
+        _pull_skipped=1
+    fi
+
+    # 5. pull --rebase, into a clean tree only
+    if [ "$t_mode" != "push" ] && [ "$_pull_skipped" -eq 0 ]; then
         _out=""
         _prc=0
-        _out=$(git_in "$path" pull --rebase --autostash "$t_remote" "$t_branch" 2>&1) || _prc=$?
+        _out=$(git_in "$path" pull --rebase --no-autostash "$t_remote" "$t_branch" 2>&1) || _prc=$?
+        # The tree can still go dirty between the check above and the rebase's
+        # own checkout — the editor is running the whole time. Without
+        # --autostash git refuses instead of clobbering, which is precisely the
+        # outcome we want: defer quietly, never page a human over it.
+        if [ "$_prc" -ne 0 ]; then
+            case "$_out" in
+                *"unstaged changes"*|*"uncommitted changes"*|\
+                *"local changes would be overwritten"*|\
+                *"Please commit your changes or stash them"*)
+                    git_in "$path" rebase --abort >/dev/null 2>&1 || :
+                    log info "$name" "tree went dirty mid-pull, deferring to the next pass"
+                    _pull_skipped=1
+                    _prc=0
+                    ;;
+            esac
+        fi
         # A concurrent `git pull` in the same repo (a human at the keyboard, an
         # agent session) appends a second for-merge line to FETCH_HEAD, and git
         # then refuses: "Cannot rebase onto multiple branches". Nothing is wrong
@@ -698,7 +730,7 @@ sync_locked() {
                     sleep 3
                     _out=""
                     _prc=0
-                    _out=$(git_in "$path" pull --rebase --autostash "$t_remote" "$t_branch" 2>&1) || _prc=$?
+                    _out=$(git_in "$path" pull --rebase --no-autostash "$t_remote" "$t_branch" 2>&1) || _prc=$?
                     ;;
             esac
         fi
@@ -753,13 +785,27 @@ sync_locked() {
         _prc=0
         _out=$(git_in "$path" push "$t_remote" "$t_branch" 2>&1) || _prc=$?
         if [ "$_prc" -ne 0 ]; then
+            # A deferred pull means the remote may well be ahead of us, so a
+            # rejected push here is the expected outcome rather than a failure:
+            # the next pass pulls and pushes once the writing has stopped.
+            if [ "$_pull_skipped" -eq 1 ]; then
+                case "$_out" in
+                    *"non-fast-forward"*|*"fetch first"*|*"rejected"*)
+                        log info "$name" "push deferred with the pull, $t_remote is ahead"
+                        return 0
+                        ;;
+                esac
+            fi
             log error "$name" "push failed ($_prc): $_out"
             return 1
         fi
     fi
 
     notify_clear "$name"
-    log info "$name" "sync ok (mode=$t_mode branch=$t_branch remote=$t_remote committed=$_committed)"
+    _pulled=1
+    [ "$_pull_skipped" -eq 1 ] && _pulled=0
+    [ "$t_mode" = "push" ] && _pulled=0
+    log info "$name" "sync ok (mode=$t_mode branch=$t_branch remote=$t_remote committed=$_committed pulled=$_pulled)"
 
     # 7. poke the peer, best effort — never fails the run
     if [ "$_committed" -eq 1 ] && [ -n "$t_peer" ]; then

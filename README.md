@@ -52,7 +52,7 @@ syncto --install-service
 ```
 
 That's it — `notes` now syncs itself every 120 seconds (the default interval) once the
-scheduler is installed, using `git pull --rebase --autostash` then `git push`, with
+scheduler is installed, using `git pull --rebase` then `git push`, with
 sensible commit messages generated automatically.
 
 ## CLI reference
@@ -127,8 +127,14 @@ notes	~/notes	interval=60,watch=on,prefix=notes
 ```
 
 running `syncto -s notes` will, in `~/notes`: `git add -A`; if anything was staged,
-commit as `notes: <file>` or `notes: N files`; `git pull --rebase --autostash origin
+commit as `notes: <file>` or `notes: N files`; `git pull --rebase origin
 main`; `git push origin main`.
+
+The pull is skipped for that pass if the working tree is dirty when it is reached. A
+rebase rewrites files on disk, and doing that to a file open in an editor makes the
+editor reload the buffer and lose the caret — so `syncto` waits for a clean tree instead,
+and never uses `--autostash`. The push still happens; the pull catches up next pass. See
+`docs/design.md` for the full rationale.
 
 ### Hook environment
 
