@@ -1198,8 +1198,12 @@ cmd_watch() {
 
 watch_loop_fswatch() {
     # -0: NUL separated, so paths with spaces or newlines survive.
-    # --exclude is a regex over the full path; keep it in step with watch_mark.
-    fswatch -0 -r --exclude '/\.git(/|$)' "$@" | {
+    # -E: extended regex. Without it fswatch reads --exclude as a POSIX *basic*
+    # regex, where ( and | are literal characters — the pattern below then
+    # matches nothing and every .git write is delivered, silently and with no
+    # error. watch_mark drops them anyway, which is exactly why this needs
+    # saying: the failure is invisible except as wasted wakeups.
+    fswatch -0 -r -E --exclude '/\.git(/|$)' "$@" | {
         while IFS= read -r -d '' _wl_ev; do
             watch_mark "$_wl_ev"
             # debounce: keep draining until W_DEBOUNCE seconds of quiet
