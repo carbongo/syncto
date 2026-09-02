@@ -1,0 +1,41 @@
+# systemd --user service template for syncto's watch daemon (Linux).
+#
+# Consumed by `syncto --install-service`, which substitutes:
+#   @EXEC@   absolute path to the syncto entry point (installed to
+#            $HOME/.local/bin/syncto). Invoked with a trailing `-w`
+#            argument to watch every target that has watch=on.
+#
+# This is the event-driven half of syncto: it stays resident and syncs a
+# target within its debounce window of a file changing, instead of waiting
+# for the next timer tick. It complements syncto.timer rather than replacing
+# it — the timer stays on as a slow safety net that catches anything the
+# watcher missed (daemon restart, a change made while it was down, and the
+# inbound direction when no peer= wake arrives).
+#
+# Only installed when at least one target has watch=on.
+#
+# systemd --user services run WITHOUT an ssh-agent. If any target pushes
+# over ssh, set a `key=` option (or an equivalent GIT_SSH_COMMAND escape
+# hatch) in the syncto config for that target, so pushes don't hang.
+#
+# Installed to: ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/syncto-watch.service
+# Install with: syncto --install-service
+# Remove with:  syncto --uninstall-service
+
+[Unit]
+Description=syncto filesystem watch daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@EXEC@ -w
+# A watcher that dies (killed watcher binary, transient git failure that
+# propagates out of the loop) must come back on its own: an unattended sync
+# that silently stopped watching is the failure mode this whole unit exists
+# to avoid. The delay keeps a hard crash-loop from spinning the CPU.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

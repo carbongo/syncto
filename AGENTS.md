@@ -3,6 +3,11 @@
 Unattended git auto-sync for one or more local repos: add, commit, rebase-pull, push,
 on an interval or a filesystem watch, per-target configurable. Pure shell, no build step.
 
+Sync is event-driven when configured for it: `watch=on` installs a resident watch daemon
+that pushes local edits within a debounce window, and `peer=` lets the pushing machine
+wake its counterpart so the inbound direction is prompt too. The interval unit stays on
+underneath as a backstop.
+
 Facts:
 - Everything lives in `syncto.sh` (bash 3.2 + bash 5 compatible — no associative arrays,
   no `${var^^}`, no `mapfile`, no `declare -A`; runs on macOS stock bash and Linux bash).
@@ -16,7 +21,12 @@ Facts:
   `-i/--install-service`, `-u/--uninstall-service`, `-L/--log`, `-v/--verbose`,
   `-h/--help`, `-V/--version`. See README for the full table.
 - Test: `./test.sh` (runs the suite under bash; project targets bash 3.2 semantics even
-  when tested under a newer bash).
+  when tested under a newer bash). The watch tests stub `inotifywait` on `PATH` to replay
+  a fixed event list, so they exercise the real watcher code path without needing
+  inotify-tools installed.
+- Unit templates in `templates/`: `syncto.{service,timer}.in` + `com.user.syncto.plist.in`
+  for the interval unit, `syncto-watch.service.in` + `com.user.syncto-watch.plist.in` for
+  the resident watch daemon (installed only when some target has `watch=on`).
 - Install: `./install.sh` (POSIX `sh`, idempotent) or the curl one-liner in the README.
 - No ssh-agent under schedulers (launchd/systemd have none): use the `key=` /
   `GIT_SSH_COMMAND` escape hatch in the target's options, not an agent-dependent setup.
@@ -25,5 +35,7 @@ Facts:
 
 docs/ map:
 - `docs/design.md` — why this tool exists, the sync algorithm step by step, the locking
-  scheme, the conflict policy (abort + notify, never auto-resolve), why bash 3.2, the
-  watcher fallback chain, and the security posture.
+  scheme, the conflict policy (abort + notify, never auto-resolve), the event-driven
+  model (watch out / peer in) and why the interval survives as a backstop, why bash 3.2,
+  the watcher fallback chain including why `.git` must be excluded from it, log
+  rotation, and the security posture.

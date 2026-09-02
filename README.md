@@ -100,6 +100,7 @@ Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/`:
   |---|---|---|
   | `interval=<seconds>` | how often this target is synced | global default |
   | `watch=on\|off` | also sync on file-change | global default |
+  | `debounce=<seconds>` | quiet period a watcher waits before syncing | `2` |
   | `mode=sync\|push\|pull` | two-way, push-only, or pull-only | `sync` |
   | `branch=<name>` | branch to sync | global default |
   | `remote=<name>` | remote to sync with | global default |
@@ -108,9 +109,11 @@ Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/`:
   | `notify=<cmd>` | run on unresolved conflict (exit 2), best-effort | none |
   | `peer=<cmd>` | run after a successful commit+push, best-effort | none |
 
-- **`config`** — global defaults, `key=value` lines: `interval`, `watch`, `mode`,
-  `branch`, `remote`, `log` (defaults: `120`, `off`, `sync`, `main`, `origin`,
-  `~/.local/state/syncto/syncto.log`).
+- **`config`** — global defaults, `key=value` lines: `interval`, `watch`, `debounce`,
+  `mode`, `branch`, `remote`, `log`, `log_max` (defaults: `120`, `off`, `2`, `sync`,
+  `main`, `origin`, `~/.local/state/syncto/syncto.log`, `2097152`). `log_max` is the
+  size in bytes past which the log is rotated to `.1` on the next run; `0` disables
+  rotation.
 
 See [`config.example`](./config.example) and [`targets.example`](./targets.example) for
 fully commented, worked examples of the two files — copy either into place and edit it.
@@ -154,6 +157,9 @@ be invoked repeatedly by your OS's scheduler, not left running itself. `syncto
 - **Linux (systemd):** installs a user timer + oneshot service under
   `~/.config/systemd/user/` and enables it (`systemctl --user enable --now`).
 
+If any target has `watch=on`, a second, resident unit is installed alongside the interval
+one to run `syncto --watch` — see [Watch mode](#watch-mode).
+
 `syncto --uninstall-service` reverses whichever of the two applies to the current
 platform. Both scheduler types run **without an `ssh-agent`** — if a target pushes or
 pulls over SSH, set a passphrase-less key for it via `key=<path>` (or a full
@@ -177,18 +183,45 @@ terminal has its own grant; only the scheduled path needs this.
 
 ## Watch mode
 
-`syncto --watch [name]` runs in the foreground and syncs a target as soon as its files
-change, instead of waiting for the next scheduled interval. It picks the best available
-watcher automatically:
+`syncto --watch [name]` syncs a target as soon as its files change, instead of waiting
+for the next scheduled interval. It picks the best available watcher automatically:
 
 1. `fswatch`, if installed.
 2. `inotifywait` (from `inotify-tools`), if installed.
 3. A debounced poll loop over `git status --porcelain` as a universal fallback — works
    with no extra dependency, at the cost of some CPU.
 
-All three paths debounce for 2 seconds, so a burst of saves triggers one sync, not one
-per file. Set `watch=on` in a target's options to have the installed scheduler also
-launch (or delegate to) a watcher for that target, in addition to its regular interval.
+All three paths debounce (`debounce=`, default 2 seconds) so a burst of saves triggers
+one sync, not one per file. When several targets are watched by one process they share
+the largest debounce among them, so a patient target is never cut off mid-burst.
+
+**`.git` is excluded from every watcher.** Syncing writes to `.git` — index, refs,
+`FETCH_HEAD`, reflogs — so counting those as changes would make each sync trigger the
+next one and the watcher would never go idle. The watcher binaries are told to exclude
+it and the event handler drops `.git` paths as a backstop.
+
+Set `watch=on` in a target's options and `syncto --install-service` will additionally
+install a **resident watch daemon** (`syncto-watch.service` on Linux,
+`com.user.syncto-watch` on macOS) that restarts itself if it dies. It runs *alongside*
+the interval unit, which stays on as a slow safety net for anything the watcher can't
+see: changes made while it was down, and inbound changes pushed by another machine.
+Turning `watch=on` back off and re-running `--install-service` removes the daemon again.
+
+### Reacting to another machine's push
+
+A watcher only sees *local* edits, so on its own it makes the outbound direction instant
+and leaves the inbound direction on the interval. `peer=` closes that loop: it runs after
+a successful commit+push, so the machine that just pushed can wake its counterpart and
+have it pull immediately rather than up to one interval later.
+
+```
+# machine A                                        # machine B
+peer=ssh -o BatchMode=yes -o ConnectTimeout=5 B 'systemctl --user start syncto.service'
+```
+
+With both halves in place — watch out, peer in — the interval exists only as a backstop
+and can be lengthened considerably, which is also what shrinks the window in which two
+machines can diverge far enough to conflict.
 
 ## Exit codes
 

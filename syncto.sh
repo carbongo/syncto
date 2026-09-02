@@ -12,7 +12,7 @@
 
 set -eu
 
-SYNCTO_VERSION="0.1.0"
+SYNCTO_VERSION="0.2.0"
 SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
@@ -71,6 +71,24 @@ log() {
     if [ "$VERBOSE" -eq 1 ] || [ "$_lg_level" = "error" ] || [ "$_lg_level" = "conflict" ]; then
         printf '%s\n' "$_lg_line" >&2
     fi
+    return 0
+}
+
+# log_rotate_maybe — keep the log from growing without bound. Checked once per
+# invocation rather than per line: a size probe on every log() call would cost a
+# stat per line for a file that only crosses the threshold once in thousands of
+# passes. One generation is kept (.1); anything older is not worth the disk.
+# `wc -c` rather than `stat`, whose flags differ between GNU and BSD.
+log_rotate_maybe() {
+    [ -n "${LOG_FILE:-}" ] || return 0
+    [ "${LOG_MAX:-0}" -gt 0 ] || return 0
+    [ -f "$LOG_FILE" ] || return 0
+    _lr_size=$(wc -c <"$LOG_FILE" 2>/dev/null | tr -d ' ')
+    case "$_lr_size" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "$_lr_size" -gt "$LOG_MAX" ] || return 0
+    mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
     return 0
 }
 
@@ -172,7 +190,7 @@ split_opts() {
 known_key() {
     case "$1" in
         interval|watch|mode|branch|remote|prefix|guard|notify|peer) return 0 ;;
-        key|ssh|GIT_SSH_COMMAND|log) return 0 ;;
+        key|ssh|GIT_SSH_COMMAND|log|debounce|log_max) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -199,6 +217,20 @@ validate_value() {
                 *) warn "watch must be 'on' or 'off', got '$2'"; return 1 ;;
             esac
             ;;
+        debounce)
+            case "$2" in
+                ''|*[!0-9]*) warn "debounce must be a whole number of seconds, got '$2'"; return 1 ;;
+            esac
+            if [ "$2" -lt 1 ]; then
+                warn "debounce must be at least 1 second"
+                return 1
+            fi
+            ;;
+        log_max)
+            case "$2" in
+                ''|*[!0-9]*) warn "log_max must be a whole number of bytes, got '$2'"; return 1 ;;
+            esac
+            ;;
         mode)
             case "$2" in
                 sync|push|pull) : ;;
@@ -215,6 +247,7 @@ validate_value() {
 
 G_INTERVAL=120
 G_WATCH=off
+G_DEBOUNCE=2
 G_MODE=sync
 G_BRANCH=main
 G_REMOTE=origin
@@ -225,6 +258,11 @@ G_PEER=""
 G_KEY=""
 G_SSH=""
 LOG_FILE="$STATE_DIR/syncto.log"
+# Rotate the log once it passes this many bytes (0 disables). A watch-driven
+# setup logs far less than a 2-minute timer did, but an unattended daemon that
+# never rotates still grows without bound; one rotation keeps the previous
+# generation around as .1 and nothing older.
+LOG_MAX=${SYNCTO_LOG_MAX:-2097152}
 
 load_config() {
     [ -f "$CONFIG_FILE" ] || return 0
@@ -254,6 +292,8 @@ load_config() {
         case "$_lc_k" in
             interval) G_INTERVAL=$_lc_v ;;
             watch)    G_WATCH=$_lc_v ;;
+            debounce) G_DEBOUNCE=$_lc_v ;;
+            log_max)  LOG_MAX=$_lc_v ;;
             mode)     G_MODE=$_lc_v ;;
             branch)   G_BRANCH=$_lc_v ;;
             remote)   G_REMOTE=$_lc_v ;;
@@ -350,6 +390,7 @@ tg_index_of() {
 resolve_opts() {
     t_interval=$G_INTERVAL
     t_watch=$G_WATCH
+    t_debounce=$G_DEBOUNCE
     t_mode=$G_MODE
     t_branch=$G_BRANCH
     t_remote=$G_REMOTE
@@ -387,6 +428,7 @@ resolve_opts() {
         case "$_ro_k" in
             interval) t_interval=$_ro_v ;;
             watch)    t_watch=$_ro_v ;;
+            debounce) t_debounce=$_ro_v ;;
             mode)     t_mode=$_ro_v ;;
             branch)   t_branch=$_ro_v ;;
             remote)   t_remote=$_ro_v ;;
@@ -396,7 +438,7 @@ resolve_opts() {
             peer)     t_peer=$_ro_v ;;
             key)      t_key=$(path_decode "$_ro_v") ;;
             ssh|GIT_SSH_COMMAND) t_ssh=$_ro_v ;;
-            log)      : ;;
+            log|log_max) : ;;
         esac
     done <<EOF
 $(split_opts "$_ro_opts")
@@ -456,6 +498,47 @@ on_exit() {
 }
 trap on_exit EXIT
 trap 'lock_release; exit 1' INT TERM HUP
+
+# ---------------------------------------------------------------------------
+# notify throttle
+# ---------------------------------------------------------------------------
+
+NOTIFY_DIR="$STATE_DIR/notified"
+NOTIFY_COOLDOWN=${SYNCTO_NOTIFY_COOLDOWN:-1800}
+
+# notify_due NAME -> 0 if this alert should be sent, 1 if one went out for the
+# same target within the cooldown. A conflict persists until a human clears it,
+# so without this the same message goes out on every pass — and an alert that
+# arrives thirty times is one nobody reads. Keyed by target, not by the error
+# text: git varies its own wording between passes (the fetch summary line comes
+# and goes), so hashing the message would defeat the throttle entirely.
+# notify_clear on a good pass re-arms it, so a fresh problem still alerts at once.
+notify_due() {
+    _nd_file="$NOTIFY_DIR/$(safe_name "$1")"
+    mkdir -p "$NOTIFY_DIR" 2>/dev/null || :
+    _nd_sent=0
+    if [ -f "$_nd_file" ]; then
+        _nd_sent=$(cat "$_nd_file" 2>/dev/null || printf '0')
+    fi
+    case "$_nd_sent" in
+        ''|*[!0-9]*) _nd_sent=0 ;;
+    esac
+    if [ "$_nd_sent" -gt 0 ]; then
+        _nd_age=$(( $(epoch) - _nd_sent ))
+        if [ "$_nd_age" -lt "$NOTIFY_COOLDOWN" ]; then
+            log info "$1" "same alert sent ${_nd_age}s ago, staying quiet"
+            return 1
+        fi
+    fi
+    printf '%s\n' "$(epoch)" >"$_nd_file" 2>/dev/null || :
+    return 0
+}
+
+# notify_clear NAME — the target synced cleanly, so forget the last alert.
+notify_clear() {
+    rm -f "$NOTIFY_DIR/$(safe_name "$1")" 2>/dev/null || :
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # hooks
@@ -602,6 +685,44 @@ sync_locked() {
         _out=""
         _prc=0
         _out=$(git_in "$path" pull --rebase --autostash "$t_remote" "$t_branch" 2>&1) || _prc=$?
+        # A concurrent `git pull` in the same repo (a human at the keyboard, an
+        # agent session) appends a second for-merge line to FETCH_HEAD, and git
+        # then refuses: "Cannot rebase onto multiple branches". Nothing is wrong
+        # with the repo — the next fetch rewrites FETCH_HEAD. Retry once before
+        # declaring a conflict, otherwise a harmless race pages a human.
+        if [ "$_prc" -ne 0 ]; then
+            case "$_out" in
+                *"Cannot rebase onto multiple branches"*)
+                    log warn "$name" "FETCH_HEAD race with a concurrent git, retrying once"
+                    git_in "$path" rebase --abort >/dev/null 2>&1 || :
+                    sleep 3
+                    _out=""
+                    _prc=0
+                    _out=$(git_in "$path" pull --rebase --autostash "$t_remote" "$t_branch" 2>&1) || _prc=$?
+                    ;;
+            esac
+        fi
+        # The network is not the repository. A DNS hiccup or a dropped route
+        # makes every pass fail identically for as long as it lasts, and at one
+        # pass per two minutes that is a pager storm about nothing: the working
+        # tree is untouched and the next good pass catches up on its own. Log
+        # it, do not notify — only a real divergence is worth waking someone.
+        if [ "$_prc" -ne 0 ]; then
+            case "$_out" in
+                *"Could not resolve hostname"*|\
+                *"Temporary failure in name resolution"*|\
+                *"Connection timed out"*|\
+                *"Connection reset by peer"*|\
+                *"Network is unreachable"*|\
+                *"No route to host"*|\
+                *"Operation timed out"*|\
+                *"kex_exchange_identification"*)
+                    git_in "$path" rebase --abort >/dev/null 2>&1 || :
+                    log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
+                    return 0
+                    ;;
+            esac
+        fi
         if [ "$_prc" -ne 0 ]; then
             case "$_out" in
                 *"ouldn't find remote ref"*)
@@ -614,7 +735,7 @@ sync_locked() {
         if [ "$_prc" -ne 0 ]; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
             log conflict "$name" "pull --rebase failed, aborted: $_out"
-            if [ -n "$t_notify" ]; then
+            if [ -n "$t_notify" ] && notify_due "$name"; then
                 _nout=""
                 _nrc=0
                 _nout=$(run_hook "$t_notify" "$path" "$name" "syncto: $name needs attention: $(oneline "$_out")") || _nrc=$?
@@ -637,6 +758,7 @@ sync_locked() {
         fi
     fi
 
+    notify_clear "$name"
     log info "$name" "sync ok (mode=$t_mode branch=$t_branch remote=$t_remote committed=$_committed)"
 
     # 7. poke the peer, best effort — never fails the run
@@ -949,6 +1071,8 @@ watch_collect() {
     _wc_only=${1:-}
     targets_load
     W_COUNT=0
+    W_DEBOUNCE=$G_DEBOUNCE
+    _wc_first=1
     _wc_i=0
     while [ "$_wc_i" -lt "$TG_COUNT" ]; do
         _wc_name=$(tg_name "$_wc_i")
@@ -962,6 +1086,13 @@ watch_collect() {
         eval "W_PATH_$W_COUNT=\$(tg_path \"\$_wc_i\")"
         eval "W_PEND_$W_COUNT=0"
         eval "W_FP_$W_COUNT=''"
+        # One watcher process covers every watched target, so it gets a single
+        # debounce: the most patient target's, so a slow writer is never cut off
+        # mid-burst by a neighbour that wanted a tighter window.
+        if [ "$_wc_first" -eq 1 ] || [ "$t_debounce" -gt "$W_DEBOUNCE" ]; then
+            W_DEBOUNCE=$t_debounce
+            _wc_first=0
+        fi
         W_COUNT=$((W_COUNT + 1))
         _wc_i=$((_wc_i + 1))
     done
@@ -974,6 +1105,14 @@ w_path() { eval "printf '%s' \"\${W_PATH_$1}\""; }
 # Mark whichever target owns this filesystem path.
 watch_mark() {
     _wm_ev=$1
+    # Ignore everything under .git. Syncing *writes* to .git (index, refs,
+    # FETCH_HEAD, logs), so counting those as changes makes every sync trigger
+    # the next one and the watcher never goes idle again. The watcher binaries
+    # are told to exclude .git too; this is the backstop for any that don't, and
+    # the reason the poll fallback was already safe (git status ignores .git).
+    case "$_wm_ev" in
+        */.git|*/.git/*) return 0 ;;
+    esac
     _wm_i=0
     while [ "$_wm_i" -lt "$W_COUNT" ]; do
         _wm_p=$(w_path "$_wm_i")
@@ -1038,7 +1177,7 @@ cmd_watch() {
         watch_loop_inotify "$@"
     else
         log info "" "watching ${W_COUNT} target(s) by polling"
-        printf 'syncto: no fswatch/inotifywait found — polling every 2s — ctrl-c to stop\n' >&2
+        printf 'syncto: no fswatch/inotifywait found — polling every %ss — ctrl-c to stop\n' "$W_DEBOUNCE" >&2
         watch_loop_poll
     fi
     return 0
@@ -1046,11 +1185,12 @@ cmd_watch() {
 
 watch_loop_fswatch() {
     # -0: NUL separated, so paths with spaces or newlines survive.
-    fswatch -0 -r "$@" | {
+    # --exclude is a regex over the full path; keep it in step with watch_mark.
+    fswatch -0 -r --exclude '/\.git(/|$)' "$@" | {
         while IFS= read -r -d '' _wl_ev; do
             watch_mark "$_wl_ev"
-            # debounce: keep draining for 2s of quiet before syncing
-            while IFS= read -r -d '' -t 2 _wl_ev2; do
+            # debounce: keep draining until W_DEBOUNCE seconds of quiet
+            while IFS= read -r -d '' -t "$W_DEBOUNCE" _wl_ev2; do
                 watch_mark "$_wl_ev2"
             done
             watch_flush
@@ -1060,10 +1200,11 @@ watch_loop_fswatch() {
 }
 
 watch_loop_inotify() {
-    inotifywait -m -r -q -e modify,create,delete,move --format '%w' "$@" | {
+    inotifywait -m -r -q -e modify,create,delete,move \
+        --exclude '(^|/)\.git(/|$)' --format '%w' "$@" | {
         while IFS= read -r _wl_ev; do
             watch_mark "${_wl_ev%/}"
-            while IFS= read -r -t 2 _wl_ev2; do
+            while IFS= read -r -t "$W_DEBOUNCE" _wl_ev2; do
                 watch_mark "${_wl_ev2%/}"
             done
             watch_flush
@@ -1079,7 +1220,7 @@ watch_loop_poll() {
         _wp_i=$((_wp_i + 1))
     done
     while :; do
-        sleep 2
+        sleep "$W_DEBOUNCE"
         _wp_changed=0
         _wp_i=0
         while [ "$_wp_i" -lt "$W_COUNT" ]; do
@@ -1093,8 +1234,8 @@ watch_loop_poll() {
             _wp_i=$((_wp_i + 1))
         done
         if [ "$_wp_changed" -eq 1 ]; then
-            # 2s debounce: let a burst of writes settle before syncing.
-            sleep 2
+            # Let a burst of writes settle before syncing.
+            sleep "$W_DEBOUNCE"
             _wp_i=0
             while [ "$_wp_i" -lt "$W_COUNT" ]; do
                 eval "W_FP_$_wp_i=\$(watch_fingerprint \"\$(w_path \"\$_wp_i\")\")"
@@ -1167,6 +1308,10 @@ plist_path() {
     printf '%s/Library/LaunchAgents/%s.plist' "$HOME" "$SYNCTO_LABEL"
 }
 
+watch_plist_path() {
+    printf '%s/Library/LaunchAgents/%s-watch.plist' "$HOME" "$SYNCTO_LABEL"
+}
+
 install_launchd() {
     _il_plist=$(plist_path)
     mkdir -p "$HOME/Library/LaunchAgents" || die 1 "cannot create $HOME/Library/LaunchAgents"
@@ -1208,14 +1353,64 @@ install_launchd() {
     printf 'Installed launchd agent %s (every %ss)\n' "$SYNCTO_LABEL" "$G_INTERVAL"
     printf '  unit: %s\n' "$(path_encode "$_il_plist")"
     log info "" "installed launchd agent $SYNCTO_LABEL interval=$G_INTERVAL"
+
+    _il_wplist=$(watch_plist_path)
+    if any_watch_target; then
+        if ! render_template "$SELF_DIR/templates/$SYNCTO_LABEL-watch.plist.in" \
+                >"$_il_wplist" 2>/dev/null; then
+            {
+                printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+                printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+                printf '%s\n' '<plist version="1.0">'
+                printf '%s\n' '<dict>'
+                printf '    <key>Label</key>\n    <string>%s-watch</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
+                printf '    <key>ProgramArguments</key>\n    <array>\n'
+                printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
+                printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
+                printf '        <string>-w</string>\n'
+                printf '    </array>\n'
+                printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
+                printf '        <key>PATH</key>\n        <string>%s</string>\n' \
+                    '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
+                printf '    </dict>\n'
+                printf '    <key>RunAtLoad</key>\n    <true/>\n'
+                printf '    <key>KeepAlive</key>\n    <true/>\n'
+                printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
+                printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+                printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+                printf '%s\n' '</dict>'
+                printf '%s\n' '</plist>'
+            } >"$_il_wplist" || die 1 "cannot write $_il_wplist"
+        fi
+        launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL-watch" >/dev/null 2>&1 || :
+        if ! launchctl bootstrap "gui/$_il_uid" "$_il_wplist" >/dev/null 2>&1; then
+            launchctl unload "$_il_wplist" >/dev/null 2>&1 || :
+            launchctl load "$_il_wplist" >/dev/null 2>&1 ||
+                die 1 "wrote $_il_wplist but launchctl refused to load it"
+        fi
+        printf 'Installed launchd watch agent %s-watch\n' "$SYNCTO_LABEL"
+        log info "" "installed launchd watch agent"
+    elif [ -f "$_il_wplist" ]; then
+        launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL-watch" >/dev/null 2>&1 ||
+            launchctl unload "$_il_wplist" >/dev/null 2>&1 || :
+        rm -f "$_il_wplist" || :
+        printf 'Removed launchd watch agent (no target has watch=on)\n'
+    fi
     return 0
 }
 
 uninstall_launchd() {
     _ul_plist=$(plist_path)
+    _ul_wplist=$(watch_plist_path)
     _ul_uid=$(id -u)
     launchctl bootout "gui/$_ul_uid/$SYNCTO_LABEL" >/dev/null 2>&1 ||
         launchctl unload "$_ul_plist" >/dev/null 2>&1 || :
+    launchctl bootout "gui/$_ul_uid/$SYNCTO_LABEL-watch" >/dev/null 2>&1 ||
+        launchctl unload "$_ul_wplist" >/dev/null 2>&1 || :
+    if [ -f "$_ul_wplist" ]; then
+        rm -f "$_ul_wplist" || die 1 "cannot remove $_ul_wplist"
+        printf 'Removed launchd watch agent %s-watch\n' "$SYNCTO_LABEL"
+    fi
     if [ -f "$_ul_plist" ]; then
         rm -f "$_ul_plist" || die 1 "cannot remove $_ul_plist"
         printf 'Removed launchd agent %s\n' "$SYNCTO_LABEL"
@@ -1228,6 +1423,23 @@ uninstall_launchd() {
 
 systemd_dir() {
     printf '%s/systemd/user' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+# any_watch_target -> 0 if at least one configured target has watch=on. The
+# watch daemon is only worth installing when something asked to be watched;
+# without this a plain interval setup would gain a resident process that wakes
+# for nothing.
+any_watch_target() {
+    targets_load
+    _aw_i=0
+    while [ "$_aw_i" -lt "$TG_COUNT" ]; do
+        resolve_opts "$(tg_opts "$_aw_i")" || :
+        if [ "$t_watch" = "on" ]; then
+            return 0
+        fi
+        _aw_i=$((_aw_i + 1))
+    done
+    return 1
 }
 
 install_systemd() {
@@ -1271,12 +1483,48 @@ WantedBy=timers.target
 EOF
     fi
 
+    _is_watch=0
+    if any_watch_target; then
+        _is_watch=1
+        if ! render_template "$SELF_DIR/templates/syncto-watch.service.in" \
+                >"$_is_dir/syncto-watch.service" 2>/dev/null; then
+            cat >"$_is_dir/syncto-watch.service" <<EOF || die 1 "cannot write $_is_dir/syncto-watch.service"
+[Unit]
+Description=syncto filesystem watch daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$(sched_exec) -w
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+        fi
+    fi
+
     systemctl --user daemon-reload >/dev/null 2>&1 || :
     systemctl --user enable --now syncto.timer >/dev/null 2>&1 ||
         die 1 "wrote the units but 'systemctl --user enable --now syncto.timer' failed"
     printf 'Installed systemd user timer syncto.timer (every %ss)\n' "$G_INTERVAL"
     printf '  units: %s/syncto.{service,timer}\n' "$(path_encode "$_is_dir")"
     log info "" "installed systemd user timer interval=$G_INTERVAL"
+
+    if [ "$_is_watch" -eq 1 ]; then
+        systemctl --user enable --now syncto-watch.service >/dev/null 2>&1 ||
+            die 1 "wrote the units but 'systemctl --user enable --now syncto-watch.service' failed"
+        printf 'Installed systemd user watch daemon syncto-watch.service\n'
+        log info "" "installed systemd watch daemon"
+    elif [ -f "$_is_dir/syncto-watch.service" ]; then
+        # No target wants watching any more: don't leave a resident process behind.
+        systemctl --user disable --now syncto-watch.service >/dev/null 2>&1 || :
+        rm -f "$_is_dir/syncto-watch.service" || :
+        systemctl --user daemon-reload >/dev/null 2>&1 || :
+        printf 'Removed systemd user watch daemon (no target has watch=on)\n'
+    fi
     return 0
 }
 
@@ -1284,9 +1532,11 @@ uninstall_systemd() {
     _us_dir=$(systemd_dir)
     if command -v systemctl >/dev/null 2>&1; then
         systemctl --user disable --now syncto.timer >/dev/null 2>&1 || :
+        systemctl --user disable --now syncto-watch.service >/dev/null 2>&1 || :
     fi
     _us_removed=0
-    for _us_f in "$_us_dir/syncto.timer" "$_us_dir/syncto.service"; do
+    for _us_f in "$_us_dir/syncto.timer" "$_us_dir/syncto.service" \
+                 "$_us_dir/syncto-watch.service"; do
         if [ -f "$_us_f" ]; then
             rm -f "$_us_f" || die 1 "cannot remove $_us_f"
             _us_removed=1
@@ -1396,6 +1646,7 @@ EOF
 
 main() {
     load_config
+    log_rotate_maybe
     setup_git_env
 
     action=""

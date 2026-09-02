@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent template for syncto's watch daemon (macOS).
+
+  Consumed by `syncto --install-service`, which substitutes @EXEC@ and @LOG@.
+  Only installed when at least one target has watch=on.
+
+  KeepAlive keeps the watcher resident: launchd restarts it if it exits for
+  any reason. Pairs with com.user.syncto (the interval agent), which stays on
+  as a slow safety net.
+
+  Runs through /bin/bash deliberately — macOS grants file access (Full Disk
+  Access, and the per-folder Documents/Desktop grants) to the binary the
+  scheduler exec'd. Naming /bin/bash keeps that grant on a stable binary,
+  which is what lets the watcher see an iCloud Drive path at all.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@LABEL@-watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@EXEC@</string>
+        <string>-w</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>@LOG@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG@</string>
+</dict>
+</plist>

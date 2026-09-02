@@ -9,10 +9,20 @@
 
 interval=120
 watch=off
+
+# Quiet period a watcher waits after a change before syncing, so a burst of
+# saves becomes one sync. Raise it for editors that write continuously while
+# you type (Obsidian, some IDEs); one watcher process covers every watched
+# target and uses the largest debounce among them.
+debounce=2
 mode=sync
 branch=main
 remote=origin
 log=~/.local/state/syncto/syncto.log
+
+# Rotate the log to <log>.1 once it grows past this many bytes; 0 disables.
+# Checked once per run. One generation is kept.
+log_max=2097152
 
 # Optional: schedulers (launchd/systemd) run with no ssh-agent in scope. If a target
 # pushes/pulls over SSH, point git at a passphrase-less key explicitly instead of

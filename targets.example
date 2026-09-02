@@ -16,6 +16,7 @@
 # Recognized option keys:
 #   interval=<seconds>          how often the daemon/scheduler syncs this target
 #   watch=on|off                also sync on file-change, not just on schedule
+#   debounce=<seconds>          quiet period a watcher waits before syncing (default 2)
 #   mode=sync|push|pull         sync = pull+push (default), push/pull = one-way only
 #   branch=<name>               override the global default branch
 #   remote=<name>               override the global default remote

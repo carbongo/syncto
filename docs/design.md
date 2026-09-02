@@ -87,6 +87,38 @@ The same portability concern rules out GNU-only flags entirely: no `sed -i` with
 explicit (empty, quoted) suffix argument, no `date -d`, no `readlink -f`, no `stat -c` —
 macOS ships BSD versions of these tools that reject the GNU-only forms outright.
 
+## Event-driven sync: watch out, peer in
+
+An interval alone forces one number to serve two jobs it is bad at simultaneously. Short
+intervals make the common case — nothing changed — expensive: every pass is a network
+round trip to the remote whether or not there is anything to say, and at two minutes that
+is hundreds of pointless fetches a day. Long intervals make the divergence window wide,
+and the width of that window is what decides how often two machines edit the same file
+without having seen each other's work — that is, how often a human has to resolve a
+conflict by hand.
+
+The fix is to stop using the interval for the part it is worst at and drive each
+direction from the event that actually matters:
+
+- **Outbound** is a local file change, and the watcher already sees it. `watch=on` plus
+  the resident watch daemon turns "edit → pushed" from *up to one interval* into
+  *debounce + one round trip*.
+- **Inbound** is another machine's push, which no local watcher can observe. `peer=`
+  covers it from the other side: the machine that just pushed pokes its counterpart, and
+  the counterpart pulls at once. Configured on both machines, every push is followed by
+  the other side pulling within seconds.
+
+With both halves wired, the interval no longer carries normal traffic; it is a backstop
+for what events miss — a wake that did not arrive because a machine was asleep or off the
+network, or a change made while the watch daemon was down. That is a job a much longer
+interval does well, and lengthening it removes nearly all of the idle round trips.
+
+The two mechanisms stay deliberately independent. A peer wake is best-effort and its
+failure is swallowed: a machine that cannot be reached is not an error, it is a machine
+that will catch up on its next interval. Nothing in the fast path is load-bearing — lose
+the watcher, lose the peer wake, lose both, and the system degrades exactly to the old
+interval-only behaviour rather than to a stall.
+
 ## Watcher fallback chain
 
 Watch mode needs to notice a file changed without polling expensively. Neither of the
@@ -101,9 +133,36 @@ gracefully rather than hard-requiring one:
    watcher but needs nothing beyond git itself, so watch mode always works, even on a
    bare-bones box.
 
-All three paths debounce for 2 seconds after a change is seen, so a burst of saves
-(editor autosave, a build tool touching several files) triggers one sync, not one per
-file.
+All three paths debounce after a change is seen, so a burst of saves (editor autosave, a
+build tool touching several files) triggers one sync, not one per file. The window is
+`debounce=`, default 2 seconds; one watcher process covers every watched target and uses
+the largest debounce among them, so a target that wanted a patient window is never cut
+off early by a neighbour that wanted a tight one.
+
+### `.git` must be excluded, or the watcher never sleeps
+
+A sync writes inside `.git`: the index, refs, `FETCH_HEAD`, reflogs. A watcher pointed at
+a repository root sees those writes as changes, which starts another sync, which writes
+to `.git` again. There is no natural end to that: the debounce delays each lap but never
+breaks the cycle, and each lap costs a full network round trip.
+
+So `.git` is excluded twice over — passed as an exclusion to `fswatch` and `inotifywait`
+so the events are never delivered, and dropped again in `watch_mark` as a backstop for
+any watcher that ignores or mis-parses the exclusion. The poll fallback needed neither,
+and this is worth stating because it explains why the bug stayed hidden: its fingerprint
+is `git status --porcelain`, which already ignores `.git` entirely. A setup with no
+watcher binary installed behaves correctly; installing `inotify-tools` is what would have
+exposed it.
+
+## Log rotation
+
+An unattended daemon that logs every pass and never rotates grows without bound — the
+reference setup reached 8.9 MB of almost entirely `nothing to commit` lines. The log is
+size-checked once per invocation (not per line: that would be a stat per line for a file
+that crosses the threshold once in thousands of passes) and rotated to a single `.1`
+generation past `log_max` bytes. One generation, because the value of an old sync log
+falls off a cliff after the incident it explains. `wc -c` does the measuring, since
+`stat`'s flags differ between GNU and BSD.
 
 ## Security posture
 

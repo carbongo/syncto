@@ -184,6 +184,7 @@ test_sync_basic() {
     _t_work="$_t_sb/home/work"
 
     git_q "$_t_sb" init --bare "$_t_bare" || { git -C "$_t_sb" init --bare "$_t_bare" >/dev/null 2>&1; }
+    git -C "$_t_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
     mkdir -p "$_t_work"
     git_q "$_t_work" clone "$_t_bare" . 2>/dev/null || git -C "$_t_work" clone "$_t_bare" "$_t_work" >/dev/null 2>&1
 
@@ -254,6 +255,12 @@ test_conflict() {
     _t_work="$_t_sb/home/work"
 
     git init --bare "$_t_bare" >/dev/null 2>&1
+    # HEAD in a fresh bare repo follows init.defaultBranch, which is `master` on
+    # a stock git. Every clone below expects `main`; without this the second
+    # clone checks out nothing, commits to `master`, and its `push origin main`
+    # fails silently — so no divergence is ever created and the conflict this
+    # test exists to provoke never happens.
+    git -C "$_t_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
     git clone "$_t_bare" "$_t_work" >/dev/null 2>&1
     git_q "$_t_work" config user.email test@example.com
     git_q "$_t_work" config user.name Test
@@ -400,6 +407,12 @@ test_spaces() {
     _t_work="$_t_sb/home/my repo dir"
 
     git init --bare "$_t_bare" >/dev/null 2>&1
+    # HEAD in a fresh bare repo follows init.defaultBranch, which is `master` on
+    # a stock git. Every clone below expects `main`; without this the second
+    # clone checks out nothing, commits to `master`, and its `push origin main`
+    # fails silently — so no divergence is ever created and the conflict this
+    # test exists to provoke never happens.
+    git -C "$_t_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
     git clone "$_t_bare" "$_t_work" >/dev/null 2>&1
     git_q "$_t_work" config user.email test@example.com
     git_q "$_t_work" config user.name Test
@@ -419,6 +432,126 @@ test_spaces() {
     assert_eq "spaces: pushed successfully with spaces in path" "$_local_head" "$_remote_head"
 }
 
+
+# ---------------------------------------------------------------------------
+# 8. watch: .git writes must never trigger a sync
+# ---------------------------------------------------------------------------
+
+# run_syncto_path SANDBOX STUBDIR ARGS... — as run_syncto, but with STUBDIR
+# prepended to PATH so a stub watcher binary is found instead of a real one.
+run_syncto_path() {
+    _rp_sandbox=$1
+    _rp_stub=$2
+    shift 2
+    OUT=$(HOME="$_rp_sandbox/home" \
+          XDG_CONFIG_HOME="$_rp_sandbox/home/.config" \
+          XDG_STATE_HOME="$_rp_sandbox/home/.local/state" \
+          PATH="$_rp_stub:$PATH" \
+          "$SYNCTO" "$@" 2>&1)
+    RC=$?
+}
+
+# Build a sandbox with a working target and a stub `inotifywait` that replays
+# the paths given to it, one per line, then exits (closing the pipe ends the
+# watch loop, so the test is bounded).
+watch_fixture() {
+    _wf_sb=$1
+    shift
+    mkdir -p "$_wf_sb/home" "$_wf_sb/stub"
+    _wf_bare="$_wf_sb/remote.git"
+    _wf_work="$_wf_sb/home/work"
+    git init --bare "$_wf_bare" >/dev/null 2>&1
+    git -C "$_wf_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
+    git clone "$_wf_bare" "$_wf_work" >/dev/null 2>&1
+    # syncto commits with plain `git`, not the test's `git_q`, so the identity
+    # has to live in the repo config — the sandbox HOME has no global one.
+    git_q "$_wf_work" config user.email test@example.com
+    git_q "$_wf_work" config user.name Test
+    git_q "$_wf_work" checkout -B main
+    git_q "$_wf_work" commit --allow-empty -m init
+    git_q "$_wf_work" push origin main
+    {
+        printf '#!/bin/sh\n'
+        for _wf_ev in "$@"; do
+            printf 'printf "%%s\\n" "%s"\n' "$_wf_ev"
+        done
+        printf 'exit 0\n'
+    } >"$_wf_sb/stub/inotifywait"
+    chmod +x "$_wf_sb/stub/inotifywait"
+}
+
+test_watch_ignores_git() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    # Only .git paths are emitted: the sync loop must stay asleep.
+    watch_fixture "$_t_sb" "$_t_sb/home/work/.git" "$_t_sb/home/work/.git/index" \
+                           "$_t_sb/home/work/.git/refs/heads"
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+        "branch=main,remote=origin,prefix=t,watch=on,debounce=1"
+
+    # A dirty file exists but was never announced by the watcher, so the only
+    # thing that could start a sync is a .git event.
+    printf 'untracked\n' >"$_t_work/note.md"
+    _before=$(git -C "$_t_work" rev-list --count main)
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    _after=$(git -C "$_t_work" rev-list --count main)
+
+    assert_eq "watch: .git-only events trigger no sync" "$_before" "$_after" "$OUT"
+}
+
+test_watch_syncs_real_edit() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    # A .git burst *and* a real edit: the real edit must still get through.
+    watch_fixture "$_t_sb" "$_t_sb/home/work/.git/index" "$_t_sb/home/work" \
+                           "$_t_sb/home/work/.git/FETCH_HEAD"
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+        "branch=main,remote=origin,prefix=t,watch=on,debounce=1"
+
+    printf 'real edit\n' >"$_t_work/note.md"
+    _before=$(git -C "$_t_work" rev-list --count main)
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    _after=$(git -C "$_t_work" rev-list --count main)
+
+    if [ "$_after" -gt "$_before" ]; then
+        ok "watch: a real edit still syncs"
+    else
+        fail "watch: a real edit still syncs" "commits before=$_before after=$_after
+$OUT"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 9. debounce option
+# ---------------------------------------------------------------------------
+
+test_debounce_option() {
+    _t_sb=$(new_sandbox)
+    mkdir -p "$_t_sb/home"
+    _t_target="$_t_sb/home/myrepo"
+    mkdir -p "$_t_target"
+    git_q "$_t_target" init
+
+    run_syncto "$_t_sb" --add proj "$_t_target" "debounce=5,watch=on"
+    assert_status "debounce: a numeric value is accepted" 0 "$RC" "$OUT"
+
+    _targets_file="$_t_sb/home/.config/syncto/targets"
+    case "$(cat "$_targets_file" 2>/dev/null)" in
+        *debounce=5*) ok "debounce: round-trips into the targets file" ;;
+        *) fail "debounce: round-trips into the targets file" "$(cat "$_targets_file" 2>/dev/null)" ;;
+    esac
+
+    run_syncto "$_t_sb" --add bad "$_t_target" "debounce=soon"
+    case "$OUT" in
+        *"debounce must be"*) ok "debounce: a non-numeric value is rejected" ;;
+        *) fail "debounce: a non-numeric value is rejected" "$OUT" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
@@ -430,6 +563,9 @@ test_locking
 test_guard
 test_help_version_unknown
 test_spaces
+test_watch_ignores_git
+test_watch_syncs_real_edit
+test_debounce_option
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
