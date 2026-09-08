@@ -25,6 +25,7 @@ CONFIG_FILE="$CONFIG_DIR/config"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/syncto"
 LOCK_DIR="$STATE_DIR/locks"
 LAST_DIR="$STATE_DIR/last"
+OK_DIR="$STATE_DIR/lastok"
 
 # Absolute path of this script, without readlink -f (not portable).
 SELF="$0"
@@ -189,7 +190,7 @@ split_opts() {
 # Is this a known option key?
 known_key() {
     case "$1" in
-        interval|watch|mode|branch|remote|prefix|guard|notify|peer) return 0 ;;
+        interval|watch|mode|branch|remote|prefix|guard|notify|peer|stale) return 0 ;;
         key|ssh|GIT_SSH_COMMAND|log|debounce|log_max) return 0 ;;
         *) return 1 ;;
     esac
@@ -215,6 +216,12 @@ validate_value() {
             case "$2" in
                 on|off) : ;;
                 *) warn "watch must be 'on' or 'off', got '$2'"; return 1 ;;
+            esac
+            ;;
+        stale)
+            case "$2" in
+                off) : ;;
+                ''|*[!0-9]*) warn "stale must be a whole number of seconds or 'off', got '$2'"; return 1 ;;
             esac
             ;;
         debounce)
@@ -246,6 +253,7 @@ validate_value() {
 # ---------------------------------------------------------------------------
 
 G_INTERVAL=120
+G_STALE=0
 G_WATCH=off
 G_DEBOUNCE=2
 G_MODE=sync
@@ -299,6 +307,7 @@ load_config() {
             remote)   G_REMOTE=$_lc_v ;;
             prefix)   G_PREFIX=$_lc_v ;;
             guard)    G_GUARD=$_lc_v ;;
+            stale)    G_STALE=$_lc_v ;;
             notify)   G_NOTIFY=$_lc_v ;;
             peer)     G_PEER=$_lc_v ;;
             key)      G_KEY=$(path_decode "$_lc_v") ;;
@@ -396,6 +405,7 @@ resolve_opts() {
     t_remote=$G_REMOTE
     t_prefix=$G_PREFIX
     t_guard=$G_GUARD
+    t_stale=$G_STALE
     t_notify=$G_NOTIFY
     t_peer=$G_PEER
     t_key=$G_KEY
@@ -434,6 +444,7 @@ resolve_opts() {
             remote)   t_remote=$_ro_v ;;
             prefix)   t_prefix=$_ro_v ;;
             guard)    t_guard=$_ro_v ;;
+            stale)    t_stale=$_ro_v ;;
             notify)   t_notify=$_ro_v ;;
             peer)     t_peer=$_ro_v ;;
             key)      t_key=$(path_decode "$_ro_v") ;;
@@ -602,6 +613,7 @@ sync_one() {
     sync_locked || _s_code=$?
     apply_ssh_env "$G_SSH" "$G_KEY"
     lock_release
+    stale_check "$name"
     if [ "$_s_code" -ne 0 ]; then
         _s_rc=$(worst_code "$_s_rc" "$_s_code")
     fi
@@ -802,6 +814,7 @@ sync_locked() {
     fi
 
     notify_clear "$name"
+    mark_ok "$name"
     _pulled=1
     [ "$_pull_skipped" -eq 1 ] && _pulled=0
     [ "$t_mode" = "push" ] && _pulled=0
@@ -818,6 +831,63 @@ sync_locked() {
     fi
 
     return "$_rc"
+}
+
+# mark_ok / last_ok — the last pass that actually completed a sync, as opposed to
+# mark_run's "we looked at this target". A guard that never passes again, or a
+# tree that stays dirty through every pull attempt, keeps mark_run current while
+# no bytes move; only this pair can tell the difference.
+mark_ok() {
+    mkdir -p "$OK_DIR" 2>/dev/null || :
+    printf '%s\n' "$(epoch)" >"$OK_DIR/$(safe_name "$1")" 2>/dev/null || :
+    return 0
+}
+
+last_ok() {
+    _lo_f="$OK_DIR/$(safe_name "$1")"
+    _lo_v=0
+    if [ -f "$_lo_f" ]; then
+        _lo_v=$(sed -n '1p' "$_lo_f" 2>/dev/null || printf '0')
+    fi
+    case "$_lo_v" in
+        ''|*[!0-9]*) _lo_v=0 ;;
+    esac
+    printf '%s' "$_lo_v"
+}
+
+# stale_check NAME — alert if this target has not synced successfully in a long
+# time. Every quiet skip in a pass (guard non-zero, dirty tree, deferred pull) is
+# individually correct and individually silent; nothing else in the tool notices
+# when one of them stops being transient and becomes permanent. This does, from
+# the outside, without having to enumerate the causes. Uses the caller's t_*.
+stale_check() {
+    _sc_name=$1
+    [ "$t_stale" = "off" ] && return 0
+    _sc_limit=$t_stale
+    # 0 means "derive it": long enough that ordinary deferrals never trip it,
+    # short enough that a stuck target is caught the same day.
+    [ "$_sc_limit" -eq 0 ] && _sc_limit=$((t_interval * 12))
+    [ "$_sc_limit" -lt 600 ] && _sc_limit=600
+    _sc_last=$(last_ok "$_sc_name")
+    if [ "$_sc_last" -eq 0 ]; then
+        # Never synced under this version: start the clock rather than alert on
+        # a target that may simply be new.
+        mark_ok "$_sc_name"
+        return 0
+    fi
+    _sc_age=$(( $(epoch) - _sc_last ))
+    [ "$_sc_age" -lt "$_sc_limit" ] && return 0
+    log warn "$_sc_name" "no successful sync in ${_sc_age}s (limit ${_sc_limit}s)"
+    if [ -n "$t_notify" ] && notify_due "$_sc_name"; then
+        _sc_out=""
+        _sc_rc=0
+        _sc_out=$(run_hook "$t_notify" "$path" "$_sc_name" \
+            "syncto: $_sc_name has not synced in ${_sc_age}s — check the log") || _sc_rc=$?
+        if [ "$_sc_rc" -ne 0 ]; then
+            log warn "$_sc_name" "notify hook exited $_sc_rc: $_sc_out"
+        fi
+    fi
+    return 0
 }
 
 mark_run() {
@@ -1004,7 +1074,7 @@ ensure_targets_file() {
         {
             printf '# syncto targets\n'
             printf '# NAME<TAB>PATH<TAB>OPTIONS   ($HOME is written as ~ so this file travels)\n'
-            printf '# options: interval= watch= mode= branch= remote= prefix= guard= notify= peer=\n'
+            printf '# options: interval= watch= mode= branch= remote= prefix= guard= stale= notify= peer=\n'
         } >"$TARGETS_FILE" || die 3 "cannot write $TARGETS_FILE"
     fi
     return 0
@@ -1088,6 +1158,7 @@ cmd_remove() {
     printf 'Removed %s\n' "$_cr_name"
     log info "$_cr_name" "removed target"
     rm -f "$LAST_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
+    rm -f "$OK_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
     return 0
 }
 
@@ -1667,7 +1738,8 @@ TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   remote=NAME           remote to pull and push                   [$G_REMOTE]
   prefix=TEXT           commit message prefix, "<prefix>: 3 files" [$G_PREFIX]
   guard=CMD             run first; non-zero exit skips this pass
-  notify=CMD            run when a sync stops on a conflict
+  stale=SECS|off        alert when no sync succeeded for this long [$G_STALE]
+  notify=CMD            run on a conflict, or when a target goes stale
   peer=CMD              run after a push that carried a new commit
 
   Hooks run with the target as the working directory and with SYNCTO_NAME,

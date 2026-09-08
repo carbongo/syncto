@@ -22,7 +22,9 @@
 #   remote=<name>               override the global default remote
 #   prefix=<commit msg prefix>  e.g. "notes (laptop)" -> "notes (laptop): file.md"
 #   guard=<shell cmd>           must exit 0 or this pass is skipped for this target
-#   notify=<shell cmd>          run on unresolvable conflict (exit 2), best-effort
+#   stale=<seconds>|off         alert when no sync has succeeded for this long
+#                               (default: 12x interval, at least 600s)
+#   notify=<shell cmd>          run on unresolvable conflict (exit 2) or staleness
 #   peer=<shell cmd>            run after a successful commit+push, best-effort
 #
 # A comma inside a value must be escaped as \, — see docs/design.md.

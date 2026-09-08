@@ -363,6 +363,95 @@ test_guard() {
 }
 
 # ---------------------------------------------------------------------------
+# 5b. staleness alarm
+# ---------------------------------------------------------------------------
+
+# A guard that never passes again is the failure this exists for: every pass is
+# individually "fine" and silent, and nothing syncs for hours.
+test_stale_alarm() {
+    _t_sb=$(new_sandbox)
+    mkdir -p "$_t_sb/home"
+    _t_work="$_t_sb/home/work"
+    _t_alert="$_t_sb/home/alert.txt"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" config user.email test@example.com
+    git_q "$_t_work" config user.name Test
+    git_q "$_t_work" commit --allow-empty -m init
+
+    run_syncto "$_t_sb" --add work "$_t_work" \
+        "branch=main,mode=push,stale=600,guard=exit 7,notify=printf '%s' \"\$SYNCTO_MESSAGE\" >>$_t_alert"
+
+    _ok_file="$_t_sb/home/.local/state/syncto/lastok/work"
+
+    # First pass seeds the clock instead of alerting on a brand-new target.
+    run_syncto "$_t_sb" --sync work
+    if [ -f "$_t_alert" ]; then
+        fail "stale: a never-synced target does not alert on its first pass" "$(cat "$_t_alert")"
+    else
+        ok "stale: a never-synced target does not alert on its first pass"
+    fi
+    if [ -f "$_ok_file" ]; then
+        ok "stale: the first pass seeds the last-success clock"
+    else
+        fail "stale: the first pass seeds the last-success clock" "no $_ok_file"
+    fi
+
+    # Age the clock past the limit: the guard is still failing, so nothing synced.
+    printf '%s\n' "$(( $(date +%s) - 4000 ))" >"$_ok_file"
+    run_syncto "$_t_sb" --sync work
+    assert_status "stale: an alerting pass still exits 0" 0 "$RC" "$OUT"
+    case "$(cat "$_t_alert" 2>/dev/null)" in
+        *"has not synced"*) ok "stale: a stuck guard fires the notify hook" ;;
+        *) fail "stale: a stuck guard fires the notify hook" "alert: $(cat "$_t_alert" 2>/dev/null)" ;;
+    esac
+
+    # Throttled: the same alert does not go out on every following pass.
+    _t_size=$(wc -c <"$_t_alert")
+    run_syncto "$_t_sb" --sync work
+    assert_eq "stale: the alert is throttled, not repeated every pass" \
+        "$_t_size" "$(wc -c <"$_t_alert")"
+
+    # A working target never alerts: drop the guard, sync, clock resets.
+    run_syncto "$_t_sb" --remove work
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,mode=push,stale=600"
+    printf 'x\n' >"$_t_work/f.txt"
+    run_syncto "$_t_sb" --sync work
+    _t_now=$(date +%s)
+    _t_last=$(cat "$_ok_file" 2>/dev/null || printf '0')
+    if [ "$((_t_now - _t_last))" -lt 60 ]; then
+        ok "stale: a successful sync refreshes the last-success clock"
+    else
+        fail "stale: a successful sync refreshes the last-success clock" "last_ok=$_t_last now=$_t_now"
+    fi
+}
+
+test_stale_off() {
+    _t_sb=$(new_sandbox)
+    mkdir -p "$_t_sb/home"
+    _t_work="$_t_sb/home/work"
+    _t_alert="$_t_sb/home/alert.txt"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" config user.email test@example.com
+    git_q "$_t_work" config user.name Test
+    git_q "$_t_work" commit --allow-empty -m init
+
+    run_syncto "$_t_sb" --add work "$_t_work" \
+        "branch=main,mode=push,stale=off,guard=exit 7,notify=printf '%s' \"\$SYNCTO_MESSAGE\" >>$_t_alert"
+    run_syncto "$_t_sb" --sync work
+    printf '%s\n' "0" >"$_t_sb/home/.local/state/syncto/lastok/work" 2>/dev/null || :
+    run_syncto "$_t_sb" --sync work
+    if [ -f "$_t_alert" ]; then
+        fail "stale: stale=off never alerts" "$(cat "$_t_alert")"
+    else
+        ok "stale: stale=off never alerts"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # 6. --help / --version / unknown flag
 # ---------------------------------------------------------------------------
 
@@ -667,6 +756,8 @@ test_sync_basic
 test_conflict
 test_locking
 test_guard
+test_stale_alarm
+test_stale_off
 test_help_version_unknown
 test_spaces
 test_watch_ignores_git

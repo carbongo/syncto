@@ -109,6 +109,25 @@ safe resolution path. The tool's job stops at *telling you it happened* as loudl
 `notify=` hook allows (desktop notification, chat message, whatever the user wires up) —
 it does not attempt anything past that.
 
+## Staleness: the one alarm for quiet skips
+
+Several outcomes are deliberately silent, because individually each is correct and
+transient: a non-zero `guard=`, a tree still dirty at pull time, a push deferred behind a
+deferred pull. Nothing in a single pass can tell "skipped once" from "skipped for the
+eleventh hour running" — and the failure that matters is the second one. A stale guard
+condition (a file the guard tests gets renamed) stops a target forever while every pass
+keeps logging a cheerful `info` line and exiting 0.
+
+So `mark_run` (this target was looked at, used for interval pacing) is joined by
+`mark_ok` (this target actually synced), written next to `notify_clear` at the end of a
+completed pass. After every pass, whatever its outcome, `stale_check` compares the
+last success against `stale=` — default `12 x interval`, floor 600s, `off` to disable —
+and fires the same `notify=` hook a conflict uses, through the same per-target cooldown.
+
+The check is deliberately outside-in: it never enumerates causes, so a future skip path
+is covered the day it is written. A target with no recorded success yet seeds the clock
+instead of alerting, so a newly added target doesn't page anyone before its first pass.
+
 ## Why bash 3.2
 
 macOS ships bash 3.2 (last GPLv2 release) as `/bin/bash` and does not update it; Linux

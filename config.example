@@ -15,6 +15,11 @@ watch=off
 # you type (Obsidian, some IDEs); one watcher process covers every watched
 # target and uses the largest debounce among them.
 debounce=2
+# How long a target may go without a single successful sync before the notify
+# hook is called. A failing guard or a permanently dirty tree is skipped quietly
+# on every pass by design; this is what eventually says so out loud. 0 derives it
+# from the interval (12x, never under 600s); 'off' disables the alarm.
+stale=0
 mode=sync
 branch=main
 remote=origin

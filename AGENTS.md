@@ -32,11 +32,14 @@ Facts:
   `GIT_SSH_COMMAND` escape hatch in the target's options, not an agent-dependent setup.
 - Exit codes: `0` ok, `1` error, `2` conflict needing a human, `3` config error,
   `4` lock held.
+- Quiet skips (guard non-zero, dirty tree, deferred pull) stay silent by design; the
+  `stale=` alarm is the only thing that notices when one stops being transient. State:
+  `~/.local/state/syncto/last` (pass attempted) vs `lastok` (pass succeeded).
 
 docs/ map:
 - `docs/design.md` — why this tool exists, the sync algorithm step by step, the locking
   scheme, why a rebase never runs into a dirty tree (an editor's caret is the thing being
-  protected), the conflict policy (abort + notify, never auto-resolve), the event-driven
+  protected), the conflict policy (abort + notify, never auto-resolve), the staleness alarm, the event-driven
   model (watch out / peer in) and why the interval survives as a backstop, why bash 3.2,
   the watcher fallback chain including why `.git` must be excluded from it, log
   rotation, and the security posture.

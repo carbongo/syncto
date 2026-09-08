@@ -106,7 +106,8 @@ Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/`:
   | `remote=<name>` | remote to sync with | global default |
   | `prefix=<msg>` | commit message prefix | target name |
   | `guard=<cmd>` | must exit 0 or this target is skipped this pass | none |
-  | `notify=<cmd>` | run on unresolved conflict (exit 2), best-effort | none |
+  | `stale=<seconds>\|off` | alert via `notify=` when nothing has synced for this long | `12 x interval`, min 600 |
+  | `notify=<cmd>` | run on unresolved conflict (exit 2) or staleness, best-effort | none |
   | `peer=<cmd>` | run after a successful commit+push, best-effort | none |
 
 - **`config`** — global defaults, `key=value` lines: `interval`, `watch`, `debounce`,
