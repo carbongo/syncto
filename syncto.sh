@@ -36,6 +36,9 @@ esac
 SELF_DIR=$(dirname "$SELF")
 
 VERBOSE=0
+# 1 under -d/-w: the service units point stderr at LOG_FILE, so echoing
+# errors there too would write every such line twice.
+DAEMON=0
 HELD_LOCK=""
 
 # ---------------------------------------------------------------------------
@@ -69,7 +72,7 @@ log() {
         fi
         printf '%s\n' "$_lg_line" >>"$LOG_FILE" 2>/dev/null || :
     fi
-    if [ "$VERBOSE" -eq 1 ] || [ "$_lg_level" = "error" ] || [ "$_lg_level" = "conflict" ]; then
+    if [ "$VERBOSE" -eq 1 ] || { [ "$DAEMON" -eq 0 ] && { [ "$_lg_level" = "error" ] || [ "$_lg_level" = "conflict" ]; }; }; then
         printf '%s\n' "$_lg_line" >&2
     fi
     return 0
@@ -756,7 +759,9 @@ sync_locked() {
                 *"Could not resolve hostname"*|\
                 *"Temporary failure in name resolution"*|\
                 *"Connection timed out"*|\
-                *"Connection reset by peer"*|\
+                *"Connection reset by "*|\
+                *"Connection closed by "*|\
+                *"Connection refused"*|\
                 *"Network is unreachable"*|\
                 *"No route to host"*|\
                 *"Operation timed out"*|\
@@ -1844,9 +1849,11 @@ main() {
             cmd_edit
             ;;
         -w|--watch)
+            DAEMON=1
             cmd_watch "${1:-}"
             ;;
         -d|--daemon)
+            DAEMON=1
             cmd_daemon
             ;;
         -i|--install-service)

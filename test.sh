@@ -306,6 +306,52 @@ test_conflict() {
             ok "conflict: no unmerged paths left behind"
             ;;
     esac
+
+    # Interactive runs echo the conflict to stderr; -d must not, because the
+    # service units point stderr at the log file and every line would land twice.
+    case "$OUT" in
+        *"level=conflict"*) ok "conflict: interactive run echoes the conflict to stderr" ;;
+        *) fail "conflict: interactive run echoes the conflict to stderr" "$OUT" ;;
+    esac
+    rm -rf "$_t_sb/home/.local/state/syncto/last"   # make the target due again
+    run_syncto "$_t_sb" -d
+    assert_status "conflict: -d hits the conflict too" 2 "$RC" "$OUT"
+    case "$OUT" in
+        *"level=conflict"*) fail "conflict: -d does not echo to stderr" "$OUT" ;;
+        *) ok "conflict: -d does not echo to stderr" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# network failure: a dropped connection is not a conflict
+# ---------------------------------------------------------------------------
+
+test_network_error_not_conflict() {
+    _t_sb=$(new_sandbox)
+    mkdir -p "$_t_sb/home/work"
+    _t_work="$_t_sb/home/work"
+    git_q "$_t_work" init
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" commit --allow-empty -m init
+    git_q "$_t_work" remote add origin "ssh://git@example.invalid/x.git"
+    # Stand-in ssh that fails the way GitHub's ssh-over-443 does when it drops us.
+    printf '#!/bin/sh\necho "Connection reset by 140.82.121.36 port 443" >&2\nexit 255\n' >"$_t_sb/fake-ssh"
+    chmod +x "$_t_sb/fake-ssh"
+
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t,ssh=$_t_sb/fake-ssh,notify=touch $_t_sb/notified"
+    run_syncto "$_t_sb" --sync work
+    assert_status "network: dropped connection exits 0" 0 "$RC" "$OUT"
+    if [ -e "$_t_sb/notified" ]; then
+        fail "network: dropped connection does not notify" "notify hook ran"
+    else
+        ok "network: dropped connection does not notify"
+    fi
+    _log=$(cat "$_t_sb/home/.local/state/syncto/syncto.log" 2>/dev/null)
+    case "$_log" in
+        *"level=conflict"*) fail "network: logged as warn, not conflict" "$_log" ;;
+        *"network unreachable"*) ok "network: logged as warn, not conflict" ;;
+        *) fail "network: logged as warn, not conflict" "$_log" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -754,6 +800,7 @@ half-typed parag" "$_t_body"
 test_config_roundtrip
 test_sync_basic
 test_conflict
+test_network_error_not_conflict
 test_locking
 test_guard
 test_stale_alarm
