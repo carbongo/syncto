@@ -101,6 +101,9 @@ was in before the pull attempt, runs the target's
 `notify=<shell cmd>` hook if one is set, and exits 2 (the dedicated "needs a human"
 exit code, distinct from a generic error).
 
+A transport failure (DNS, timeout, `Connection reset/closed by …`) is not a conflict: it
+logs `warn`, exits 0 and does not notify — the next pass catches up.
+
 This is a hard rule, not a default that more code could someday override: `syncto`
 never guesses which side of a conflict is "right". Silent auto-resolution (`-X ours`,
 "take theirs", merge-and-hope) can silently discard real work, and the failure mode is
@@ -232,6 +235,9 @@ that crosses the threshold once in thousands of passes) and rotated to a single 
 generation past `log_max` bytes. One generation, because the value of an old sync log
 falls off a cliff after the incident it explains. `wc -c` does the measuring, since
 `stat`'s flags differ between GNU and BSD.
+
+Under `-d`/`-w` errors and conflicts are not also echoed to stderr: the launchd units
+point stderr at the log file, so each line would be written twice.
 
 ## Security posture
 
