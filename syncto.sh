@@ -194,7 +194,7 @@ split_opts() {
 known_key() {
     case "$1" in
         interval|watch|mode|branch|remote|prefix|guard|notify|peer|stale) return 0 ;;
-        key|ssh|GIT_SSH_COMMAND|log|debounce|log_max) return 0 ;;
+        key|ssh|GIT_SSH_COMMAND|log|debounce|log_max|remote_poll) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -219,6 +219,12 @@ validate_value() {
             case "$2" in
                 on|off) : ;;
                 *) warn "watch must be 'on' or 'off', got '$2'"; return 1 ;;
+            esac
+            ;;
+        remote_poll)
+            case "$2" in
+                off) : ;;
+                ''|*[!0-9]*) warn "remote_poll must be a whole number of seconds or 'off', got '$2'"; return 1 ;;
             esac
             ;;
         stale)
@@ -257,6 +263,7 @@ validate_value() {
 
 G_INTERVAL=120
 G_STALE=0
+G_REMOTE_POLL=0
 G_WATCH=off
 G_DEBOUNCE=2
 G_MODE=sync
@@ -311,6 +318,7 @@ load_config() {
             prefix)   G_PREFIX=$_lc_v ;;
             guard)    G_GUARD=$_lc_v ;;
             stale)    G_STALE=$_lc_v ;;
+            remote_poll) G_REMOTE_POLL=$_lc_v ;;
             notify)   G_NOTIFY=$_lc_v ;;
             peer)     G_PEER=$_lc_v ;;
             key)      G_KEY=$(path_decode "$_lc_v") ;;
@@ -409,11 +417,13 @@ resolve_opts() {
     t_prefix=$G_PREFIX
     t_guard=$G_GUARD
     t_stale=$G_STALE
+    t_remote_poll=$G_REMOTE_POLL
     t_notify=$G_NOTIFY
     t_peer=$G_PEER
     t_key=$G_KEY
     t_ssh=$G_SSH
     t_rc=0
+    [ "$t_remote_poll" = "off" ] && t_remote_poll=0
     _ro_opts=$1
     [ -n "$_ro_opts" ] || return 0
     while IFS= read -r _ro_kv; do
@@ -448,6 +458,7 @@ resolve_opts() {
             prefix)   t_prefix=$_ro_v ;;
             guard)    t_guard=$_ro_v ;;
             stale)    t_stale=$_ro_v ;;
+            remote_poll) t_remote_poll=$_ro_v ;;
             notify)   t_notify=$_ro_v ;;
             peer)     t_peer=$_ro_v ;;
             key)      t_key=$(path_decode "$_ro_v") ;;
@@ -457,6 +468,7 @@ resolve_opts() {
     done <<EOF
 $(split_opts "$_ro_opts")
 EOF
+    [ "$t_remote_poll" = "off" ] && t_remote_poll=0
     return 0
 }
 
@@ -509,6 +521,9 @@ lock_release() {
 
 on_exit() {
     lock_release
+    if [ -n "${P_PID:-}" ]; then
+        kill "$P_PID" 2>/dev/null || :
+    fi
 }
 trap on_exit EXIT
 trap 'lock_release; exit 1' INT TERM HUP
@@ -1079,7 +1094,7 @@ ensure_targets_file() {
         {
             printf '# syncto targets\n'
             printf '# NAME<TAB>PATH<TAB>OPTIONS   ($HOME is written as ~ so this file travels)\n'
-            printf '# options: interval= watch= mode= branch= remote= prefix= guard= stale= notify= peer=\n'
+            printf '# options: interval= watch= mode= branch= remote= prefix= guard= stale= notify= peer= remote_poll=\n'
         } >"$TARGETS_FILE" || die 3 "cannot write $TARGETS_FILE"
     fi
     return 0
@@ -1287,11 +1302,22 @@ watch_fingerprint() {
 
 cmd_watch() {
     watch_collect "${1:-}"
-    if [ "$W_COUNT" -eq 0 ]; then
+    poll_collect "${1:-}"
+    if [ "$W_COUNT" -eq 0 ] && [ "$P_COUNT" -eq 0 ]; then
         if [ -n "${1:-}" ]; then
             die 3 "no such target: $1"
         fi
-        die 3 "no targets have watch=on; add one with 'syncto --add NAME PATH watch=on'"
+        die 3 "no targets have watch=on or remote_poll; add one with 'syncto --add NAME PATH watch=on'"
+    fi
+
+    if [ "$P_COUNT" -gt 0 ]; then
+        log info "" "polling ${P_COUNT} remote(s) every ${P_TICK}s"
+        if [ "$W_COUNT" -eq 0 ]; then
+            poll_loop
+            return 0
+        fi
+        poll_loop &
+        P_PID=$!
     fi
 
     # Positional list of the paths to hand to the watcher binary.
@@ -1382,6 +1408,83 @@ watch_loop_poll() {
             done
             watch_flush
         fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# remote poll: the inbound direction for pushes no peer= wake announces
+# ---------------------------------------------------------------------------
+
+P_COUNT=0
+P_PID=""
+
+poll_collect() {
+    # Build the poll set from targets already loaded: NAME if given, else every
+    # target with remote_poll > 0. push-only targets never pull, so never poll.
+    _pc_only=${1:-}
+    P_COUNT=0
+    P_TICK=0
+    _pc_i=0
+    while [ "$_pc_i" -lt "$TG_COUNT" ]; do
+        resolve_opts "$(tg_opts "$_pc_i")" || :
+        if { [ -z "$_pc_only" ] || [ "$_pc_only" = "$(tg_name "$_pc_i")" ]; } &&
+           [ "$t_remote_poll" -gt 0 ] && [ "$t_mode" != "push" ]; then
+            eval "P_IDX_$P_COUNT=\$_pc_i"
+            eval "P_EVERY_$P_COUNT=\$t_remote_poll"
+            eval "P_LAST_$P_COUNT=0"
+            if [ "$P_COUNT" -eq 0 ] || [ "$t_remote_poll" -lt "$P_TICK" ]; then
+                P_TICK=$t_remote_poll
+            fi
+            P_COUNT=$((P_COUNT + 1))
+        fi
+        _pc_i=$((_pc_i + 1))
+    done
+    return 0
+}
+
+# remote_moved INDEX -> 0 if the remote branch head is a commit this clone does
+# not have. One ls-remote is a single ref advertisement, no objects, so polling
+# it often costs far less than a full sync pass. A head that is already in local
+# history (pushed from here, or local is ahead) is not news. An unreachable
+# remote reads as "not moved": the next tick or the interval catches up.
+remote_moved() {
+    _rm_path=$(tg_path "$1")
+    resolve_opts "$(tg_opts "$1")" || :
+    apply_ssh_env "$t_ssh" "$t_key"
+    _rm_sha=$(git_in "$_rm_path" ls-remote "$t_remote" "refs/heads/$t_branch" 2>/dev/null |
+        awk 'NR == 1 { print $1 }') || _rm_sha=""
+    apply_ssh_env "$G_SSH" "$G_KEY"
+    [ -n "$_rm_sha" ] || return 1
+    if git_in "$_rm_path" merge-base --is-ancestor "$_rm_sha" HEAD >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+poll_loop() {
+    trap 'lock_release; exit 0' INT TERM HUP
+    while :; do
+        # sleep in the background so a TERM interrupts the wait at once
+        sleep "$P_TICK" &
+        wait $! || :
+        _pl_now=$(epoch)
+        _pl_i=0
+        while [ "$_pl_i" -lt "$P_COUNT" ]; do
+            eval "_pl_last=\$P_LAST_$_pl_i; _pl_every=\$P_EVERY_$_pl_i; _pl_idx=\$P_IDX_$_pl_i"
+            if [ $((_pl_now - _pl_last)) -ge "$_pl_every" ]; then
+                eval "P_LAST_$_pl_i=\$_pl_now"
+                if remote_moved "$_pl_idx"; then
+                    _pl_name=$(tg_name "$_pl_idx")
+                    log info "$_pl_name" "remote_poll: $t_remote/$t_branch moved, syncing"
+                    _pl_one=0
+                    sync_one "$_pl_idx" || _pl_one=$?
+                    if [ "$_pl_one" -ne 4 ]; then
+                        mark_run "$_pl_name"
+                    fi
+                fi
+            fi
+            _pl_i=$((_pl_i + 1))
+        done
     done
 }
 
@@ -1533,7 +1636,7 @@ install_launchd() {
         launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL-watch" >/dev/null 2>&1 ||
             launchctl unload "$_il_wplist" >/dev/null 2>&1 || :
         rm -f "$_il_wplist" || :
-        printf 'Removed launchd watch agent (no target has watch=on)\n'
+        printf 'Removed launchd watch agent (no target has watch=on or remote_poll)\n'
     fi
     return 0
 }
@@ -1564,7 +1667,8 @@ systemd_dir() {
     printf '%s/systemd/user' "${XDG_CONFIG_HOME:-$HOME/.config}"
 }
 
-# any_watch_target -> 0 if at least one configured target has watch=on. The
+# any_watch_target -> 0 if at least one configured target has watch=on or
+# remote_poll (the watch daemon also runs the remote poll). The
 # watch daemon is only worth installing when something asked to be watched;
 # without this a plain interval setup would gain a resident process that wakes
 # for nothing.
@@ -1573,7 +1677,7 @@ any_watch_target() {
     _aw_i=0
     while [ "$_aw_i" -lt "$TG_COUNT" ]; do
         resolve_opts "$(tg_opts "$_aw_i")" || :
-        if [ "$t_watch" = "on" ]; then
+        if [ "$t_watch" = "on" ] || { [ "$t_remote_poll" -gt 0 ] && [ "$t_mode" != "push" ]; }; then
             return 0
         fi
         _aw_i=$((_aw_i + 1))
@@ -1662,7 +1766,7 @@ EOF
         systemctl --user disable --now syncto-watch.service >/dev/null 2>&1 || :
         rm -f "$_is_dir/syncto-watch.service" || :
         systemctl --user daemon-reload >/dev/null 2>&1 || :
-        printf 'Removed systemd user watch daemon (no target has watch=on)\n'
+        printf 'Removed systemd user watch daemon (no target has watch=on or remote_poll)\n'
     fi
     return 0
 }
@@ -1726,7 +1830,7 @@ ACTIONS
   -a, --add NAME PATH [K=V...]  add a target
   -r, --remove NAME             remove a target
   -e, --edit                    open the targets file in \$EDITOR
-  -w, --watch [NAME]            foreground watch loop (NAME, else every watch=on target)
+  -w, --watch [NAME]            foreground watch + remote poll loop (NAME, else every watch=on/remote_poll target)
   -d, --daemon                  run one scheduled pass — what launchd/systemd calls
   -i, --install-service         install the launchd agent or systemd user timer
   -u, --uninstall-service       remove it again
@@ -1746,6 +1850,7 @@ TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   stale=SECS|off        alert when no sync succeeded for this long [$G_STALE]
   notify=CMD            run on a conflict, or when a target goes stale
   peer=CMD              run after a push that carried a new commit
+  remote_poll=SECS|off  watch daemon syncs when the remote head moves [$G_REMOTE_POLL]
 
   Hooks run with the target as the working directory and with SYNCTO_NAME,
   SYNCTO_PATH, SYNCTO_BRANCH, SYNCTO_REMOTE and SYNCTO_MESSAGE in the

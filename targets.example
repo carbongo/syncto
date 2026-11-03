@@ -26,6 +26,7 @@
 #                               (default: 12x interval, at least 600s)
 #   notify=<shell cmd>          run on unresolvable conflict (exit 2) or staleness
 #   peer=<shell cmd>            run after a successful commit+push, best-effort
+#   remote_poll=<seconds>|off   watch daemon syncs when the remote head moves (default off)
 #
 # A comma inside a value must be escaped as \, — see docs/design.md.
 #

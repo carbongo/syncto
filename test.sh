@@ -794,6 +794,52 @@ half-typed parag" "$_t_body"
 }
 
 # ---------------------------------------------------------------------------
+# 11. remote_poll: the watch daemon pulls a push it was never told about
+# ---------------------------------------------------------------------------
+
+test_remote_poll() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    watch_fixture "$_t_sb"
+    # Watchers that report nothing and stay up long enough for a few poll ticks.
+    printf '#!/bin/sh\nsleep 4\nexit 0\n' >"$_t_sb/stub/fswatch"
+    cp "$_t_sb/stub/fswatch" "$_t_sb/stub/inotifywait"
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+        "branch=main,remote=origin,prefix=t,watch=on,remote_poll=1"
+    assert_status "remote_poll: a numeric value is accepted" 0 "$RC" "$OUT"
+
+    _t_log="$_t_sb/home/.local/state/syncto/syncto.log"
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    if grep -q 'remote_poll:' "$_t_log" 2>/dev/null; then
+        fail "remote_poll: an unchanged remote triggers no sync" "$(cat "$_t_log")"
+    else
+        ok "remote_poll: an unchanged remote triggers no sync"
+    fi
+
+    _t_other="$_t_sb/other-clone"
+    git clone "$_t_sb/remote.git" "$_t_other" >/dev/null 2>&1
+    printf 'from elsewhere\n' >"$_t_other/other.txt"
+    git_q "$_t_other" add -A
+    git_q "$_t_other" commit -m "other machine change"
+    git_q "$_t_other" push origin main
+
+    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    if [ -f "$_t_work/other.txt" ]; then
+        ok "remote_poll: a remote push is pulled without any local event"
+    else
+        fail "remote_poll: a remote push is pulled without any local event" "$OUT
+$(cat "$_t_log" 2>/dev/null)"
+    fi
+
+    run_syncto "$_t_sb" --add bad "$_t_work" "remote_poll=soon"
+    case "$RC" in
+        0) fail "remote_poll: a non-numeric value is rejected" "$OUT" ;;
+        *) ok "remote_poll: a non-numeric value is rejected" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
@@ -812,6 +858,7 @@ test_watch_syncs_real_edit
 test_watch_skips_ignored
 test_debounce_option
 test_dirty_tree_defers_pull
+test_remote_poll
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

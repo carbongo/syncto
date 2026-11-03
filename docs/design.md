@@ -172,6 +172,12 @@ for what events miss — a wake that did not arrive because a machine was asleep
 network, or a change made while the watch daemon was down. That is a job a much longer
 interval does well, and lengthening it removes nearly all of the idle round trips.
 
+`peer=` cannot see pushes from outside the syncto machines (CI, web editors, cloud
+agents). `remote_poll=` covers those from the daemon: one `ls-remote` per tick is a ref
+advertisement with no objects, so a minute-scale poll costs far less than a minute-scale
+interval of full passes, and a full sync runs only when the advertised head is missing
+locally.
+
 The two mechanisms stay deliberately independent. A peer wake is best-effort and its
 failure is swallowed: a machine that cannot be reached is not an error, it is a machine
 that will catch up on its next interval. Nothing in the fast path is load-bearing — lose
