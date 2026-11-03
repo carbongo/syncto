@@ -109,10 +109,11 @@ Two files, both under `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/`:
   | `stale=<seconds>\|off` | alert via `notify=` when nothing has synced for this long | `12 x interval`, min 600 |
   | `notify=<cmd>` | run on unresolved conflict (exit 2) or staleness, best-effort | none |
   | `peer=<cmd>` | run after a successful commit+push, best-effort | none |
+  | `remote_poll=<seconds>\|off` | watch daemon checks the remote head this often, syncs when it moved | `off` |
 
 - **`config`** — global defaults, `key=value` lines: `interval`, `watch`, `debounce`,
-  `mode`, `branch`, `remote`, `log`, `log_max` (defaults: `120`, `off`, `2`, `sync`,
-  `main`, `origin`, `~/.local/state/syncto/syncto.log`, `2097152`). `log_max` is the
+  `mode`, `branch`, `remote`, `remote_poll`, `log`, `log_max` (defaults: `120`, `off`, `2`, `sync`,
+  `main`, `origin`, `off`, `~/.local/state/syncto/syncto.log`, `2097152`). `log_max` is the
   size in bytes past which the log is rotated to `.1` on the next run; `0` disables
   rotation.
 
@@ -231,6 +232,14 @@ have it pull immediately rather than up to one interval later.
 # machine A                                        # machine B
 peer=ssh -o BatchMode=yes -o ConnectTimeout=5 B 'systemctl --user start syncto.service'
 ```
+
+### Pushes from anywhere else
+
+`peer=` only covers machines running syncto. For pushes from anywhere else (CI, a web
+editor, a cloud agent), set `remote_poll=<seconds>`: the watch daemon runs one
+`git ls-remote` per target that often and syncs only when the remote head is a commit
+the clone doesn't have. With `remote_poll` on, `--install-service` installs the watch
+daemon even if no target has `watch=on`.
 
 With both halves in place — watch out, peer in — the interval exists only as a backstop
 and can be lengthened considerably, which is also what shrinks the window in which two

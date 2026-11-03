@@ -5,7 +5,8 @@ on an interval or a filesystem watch, per-target configurable. Pure shell, no bu
 
 Sync is event-driven when configured for it: `watch=on` installs a resident watch daemon
 that pushes local edits within a debounce window, and `peer=` lets the pushing machine
-wake its counterpart so the inbound direction is prompt too. The interval unit stays on
+wake its counterpart so the inbound direction is prompt too; `remote_poll=` has the
+watch daemon catch pushes from anywhere else via `git ls-remote`. The interval unit stays on
 underneath as a backstop.
 
 Facts:
