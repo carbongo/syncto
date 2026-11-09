@@ -25,7 +25,6 @@ case "$SELF" in
     /*) : ;;
     *)  SELF="$PWD/$SELF" ;;
 esac
-SELF_DIR=$(dirname "$SELF")
 
 VERBOSE=0
 # 1 under -d/-w: the units already send stderr to LOG_FILE.
@@ -1470,24 +1469,6 @@ sched_exec() {
     fi
 }
 
-# render_template FILE: fills @NAME@ placeholders; fails if any remain.
-# Installed copies use the inline units below, kept identical.
-render_template() {
-    [ -f "$1" ] || return 1
-    _rt_exec=$(sched_exec)
-    [ -x "$_rt_exec" ] || return 1
-    _rt=$(cat "$1") || return 1
-    _rt=${_rt//@EXEC@/$_rt_exec}
-    _rt=${_rt//@INTERVAL@/$G_INTERVAL}
-    _rt=${_rt//@LOG@/$LOG_FILE}
-    _rt=${_rt//@LABEL@/$SYNCTO_LABEL}
-    case "$_rt" in
-        *@[A-Z]*@*) return 1 ;;
-    esac
-    printf '%s\n' "$_rt"
-    return 0
-}
-
 # Print the ProgramArguments / ExecStart words, one per line.
 # macOS always goes through $SHELL_BIN: TCC grants (Full Disk Access) attach
 # to the binary launchd exec'd, and a script holds none.
@@ -1511,31 +1492,29 @@ install_launchd() {
     _il_plist=$(plist_path)
     mkdir -p "$HOME/Library/LaunchAgents" || die 1 "cannot create $HOME/Library/LaunchAgents"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
-    if ! render_template "$SELF_DIR/templates/$SYNCTO_LABEL.plist.in" >"$_il_plist" 2>/dev/null; then
-        {
-            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
-            printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-            printf '%s\n' '<plist version="1.0">'
-            printf '%s\n' '<dict>'
-            printf '    <key>Label</key>\n    <string>%s</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
-            printf '    <key>ProgramArguments</key>\n    <array>\n'
-            sched_argv | while IFS= read -r _il_a; do
-                printf '        <string>%s</string>\n' "$(xml_escape "$_il_a")"
-            done
-            printf '    </array>\n'
-            printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
-            printf '        <key>PATH</key>\n        <string>%s</string>\n' \
-                '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
-            printf '    </dict>\n'
-            printf '    <key>StartInterval</key>\n    <integer>%s</integer>\n' "$G_INTERVAL"
-            printf '    <key>RunAtLoad</key>\n    <true/>\n'
-            printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
-            printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-            printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-            printf '%s\n' '</dict>'
-            printf '%s\n' '</plist>'
-        } >"$_il_plist" || die 1 "cannot write $_il_plist"
-    fi
+    {
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+        printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+        printf '%s\n' '<plist version="1.0">'
+        printf '%s\n' '<dict>'
+        printf '    <key>Label</key>\n    <string>%s</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
+        printf '    <key>ProgramArguments</key>\n    <array>\n'
+        sched_argv | while IFS= read -r _il_a; do
+            printf '        <string>%s</string>\n' "$(xml_escape "$_il_a")"
+        done
+        printf '    </array>\n'
+        printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
+        printf '        <key>PATH</key>\n        <string>%s</string>\n' \
+            '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
+        printf '    </dict>\n'
+        printf '    <key>StartInterval</key>\n    <integer>%s</integer>\n' "$G_INTERVAL"
+        printf '    <key>RunAtLoad</key>\n    <true/>\n'
+        printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
+        printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+        printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+        printf '%s\n' '</dict>'
+        printf '%s\n' '</plist>'
+    } >"$_il_plist" || die 1 "cannot write $_il_plist"
 
     _il_uid=$(id -u)
     launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL" >/dev/null 2>&1 || :
@@ -1551,32 +1530,29 @@ install_launchd() {
 
     _il_wplist=$(watch_plist_path)
     if any_watch_target; then
-        if ! render_template "$SELF_DIR/templates/$SYNCTO_LABEL-watch.plist.in" \
-                >"$_il_wplist" 2>/dev/null; then
-            {
-                printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
-                printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-                printf '%s\n' '<plist version="1.0">'
-                printf '%s\n' '<dict>'
-                printf '    <key>Label</key>\n    <string>%s-watch</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
-                printf '    <key>ProgramArguments</key>\n    <array>\n'
-                printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
-                printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
-                printf '        <string>watch</string>\n'
-                printf '    </array>\n'
-                printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
-                printf '        <key>PATH</key>\n        <string>%s</string>\n' \
-                    '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
-                printf '    </dict>\n'
-                printf '    <key>RunAtLoad</key>\n    <true/>\n'
-                printf '    <key>KeepAlive</key>\n    <true/>\n'
-                printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
-                printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-                printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-                printf '%s\n' '</dict>'
-                printf '%s\n' '</plist>'
-            } >"$_il_wplist" || die 1 "cannot write $_il_wplist"
-        fi
+        {
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+            printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+            printf '%s\n' '<plist version="1.0">'
+            printf '%s\n' '<dict>'
+            printf '    <key>Label</key>\n    <string>%s-watch</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
+            printf '    <key>ProgramArguments</key>\n    <array>\n'
+            printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
+            printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
+            printf '        <string>watch</string>\n'
+            printf '    </array>\n'
+            printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
+            printf '        <key>PATH</key>\n        <string>%s</string>\n' \
+                '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
+            printf '    </dict>\n'
+            printf '    <key>RunAtLoad</key>\n    <true/>\n'
+            printf '    <key>KeepAlive</key>\n    <true/>\n'
+            printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
+            printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+            printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+            printf '%s\n' '</dict>'
+            printf '%s\n' '</plist>'
+        } >"$_il_wplist" || die 1 "cannot write $_il_wplist"
         launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL-watch" >/dev/null 2>&1 || :
         if ! launchctl bootstrap "gui/$_il_uid" "$_il_wplist" >/dev/null 2>&1; then
             launchctl unload "$_il_wplist" >/dev/null 2>&1 || :
@@ -1641,14 +1617,13 @@ install_systemd() {
     mkdir -p "$_is_dir" || die 1 "cannot create $_is_dir"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
 
-    if ! render_template "$SELF_DIR/templates/syncto.service.in" >"$_is_dir/syncto.service" 2>/dev/null; then
-        _is_argv=""
-        while IFS= read -r _is_a; do
-            _is_argv="$_is_argv \"$_is_a\""
-        done <<EOF
+    _is_argv=""
+    while IFS= read -r _is_a; do
+        _is_argv="$_is_argv \"$_is_a\""
+    done <<EOF
 $(sched_argv)
 EOF
-        cat >"$_is_dir/syncto.service" <<EOF || die 1 "cannot write $_is_dir/syncto.service"
+    cat >"$_is_dir/syncto.service" <<EOF || die 1 "cannot write $_is_dir/syncto.service"
 [Unit]
 Description=syncto scheduled sync pass
 After=network-online.target
@@ -1658,10 +1633,8 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=${_is_argv# }
 EOF
-    fi
 
-    if ! render_template "$SELF_DIR/templates/syncto.timer.in" >"$_is_dir/syncto.timer" 2>/dev/null; then
-        cat >"$_is_dir/syncto.timer" <<EOF || die 1 "cannot write $_is_dir/syncto.timer"
+    cat >"$_is_dir/syncto.timer" <<EOF || die 1 "cannot write $_is_dir/syncto.timer"
 [Unit]
 Description=syncto scheduled sync timer
 
@@ -1674,14 +1647,11 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-    fi
 
     _is_watch=0
     if any_watch_target; then
         _is_watch=1
-        if ! render_template "$SELF_DIR/templates/syncto-watch.service.in" \
-                >"$_is_dir/syncto-watch.service" 2>/dev/null; then
-            cat >"$_is_dir/syncto-watch.service" <<EOF || die 1 "cannot write $_is_dir/syncto-watch.service"
+        cat >"$_is_dir/syncto-watch.service" <<EOF || die 1 "cannot write $_is_dir/syncto-watch.service"
 [Unit]
 Description=syncto filesystem watch daemon
 After=network-online.target
@@ -1696,7 +1666,6 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 EOF
-        fi
     fi
 
     systemctl --user daemon-reload >/dev/null 2>&1 || :
