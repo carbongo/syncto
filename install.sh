@@ -20,7 +20,7 @@ CONFIG_FILE="$CONFIG_DIR/config"
 PATH_MARKER="# added by syncto installer"
 PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
 
 usage() {
   cat <<EOF

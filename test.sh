@@ -121,6 +121,7 @@ $(cat "$_targets_file" 2>/dev/null)"
         ok "add: path stored with ~ not literal home"
     fi
 
+    # shellcheck disable=SC2088 # a literal ~ is the point
     if grep -Fq '~/myrepo' "$_targets_file" 2>/dev/null; then
         ok "add: path stored as ~/myrepo"
     else
@@ -285,7 +286,6 @@ test_conflict() {
     printf 'line1-changed-locally\n' >"$_t_work/conflict.txt"
 
     run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t"
-    RC_ADD=$RC
 
     run_syncto "$_t_sb" --sync work
     assert_status "conflict: sync exits 2" 2 "$RC" "$OUT"
@@ -343,6 +343,7 @@ fake_ssh_target() {
 
 # assert_log NAME PATTERN [FORBIDDEN]: the sandbox log matches PATTERN and,
 # if given, does not match FORBIDDEN.
+# shellcheck disable=SC2254 # PATTERN and FORBIDDEN are globs
 assert_log() {
     _al_log=$(cat "$_t_sb/home/.local/state/syncto/syncto.log" 2>/dev/null)
     case "$_al_log" in

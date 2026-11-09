@@ -142,8 +142,8 @@ path_encode() {
 
 path_decode() {
     case "$1" in
-        "~") printf '%s' "$HOME" ;;
-        "~/"*) printf '%s%s' "$HOME" "${1#\~}" ;;
+        \~) printf '%s' "$HOME" ;;
+        \~/*) printf '%s%s' "$HOME" "${1#\~}" ;;
         *) printf '%s' "$1" ;;
     esac
 }
@@ -151,8 +151,8 @@ path_decode() {
 abs_path() {
     case "$1" in
         /*) printf '%s' "$1" ;;
-        "~") printf '%s' "$HOME" ;;
-        "~/"*) printf '%s%s' "$HOME" "${1#\~}" ;;
+        \~) printf '%s' "$HOME" ;;
+        \~/*) printf '%s%s' "$HOME" "${1#\~}" ;;
         *) printf '%s/%s' "$PWD" "$1" ;;
     esac
 }
@@ -338,6 +338,7 @@ setup_git_env() {
 }
 
 # apply_ssh_env SSH_COMMAND KEY_PATH — scoped per target, cleared when neither is set.
+# shellcheck disable=SC2089,SC2090 # git runs GIT_SSH_COMMAND through a shell
 apply_ssh_env() {
     if [ -n "$1" ]; then
         GIT_SSH_COMMAND=$1
@@ -1295,6 +1296,7 @@ watch_flush() {
     _wf_rc=0
     while [ "$_wf_i" -lt "$W_COUNT" ]; do
         eval "_wf_p=\$W_PEND_$_wf_i"
+        # shellcheck disable=SC2154 # set by eval
         if [ "$_wf_p" -eq 1 ]; then
             eval "W_PEND_$_wf_i=0"
             _wf_idx=$(w_idx "$_wf_i")
@@ -1420,6 +1422,7 @@ watch_loop_poll() {
         while [ "$_wp_i" -lt "$W_COUNT" ]; do
             _wp_new=$(watch_fingerprint "$(w_path "$_wp_i")")
             eval "_wp_old=\$W_FP_$_wp_i"
+            # shellcheck disable=SC2154 # set by eval
             if [ "$_wp_new" != "$_wp_old" ]; then
                 eval "W_FP_$_wp_i=\$_wp_new"
                 eval "W_PEND_$_wp_i=1"
@@ -1500,6 +1503,7 @@ poll_loop() {
         _pl_i=0
         while [ "$_pl_i" -lt "$P_COUNT" ]; do
             eval "_pl_last=\$P_LAST_$_pl_i; _pl_every=\$P_EVERY_$_pl_i; _pl_idx=\$P_IDX_$_pl_i"
+            # shellcheck disable=SC2154 # set by eval
             if [ $((_pl_now - _pl_last)) -ge "$_pl_every" ]; then
                 eval "P_LAST_$_pl_i=\$_pl_now"
                 if remote_moved "$_pl_idx"; then
