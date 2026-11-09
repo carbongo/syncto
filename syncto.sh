@@ -18,6 +18,7 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/syncto"
 LOCK_DIR="$STATE_DIR/locks"
 LAST_DIR="$STATE_DIR/last"
 OK_DIR="$STATE_DIR/lastok"
+OUTCOME_DIR="$STATE_DIR/outcome"
 
 # Absolute path of this script, without readlink -f (not portable).
 SELF="$0"
@@ -626,12 +627,12 @@ sync_one() {
     fi
 
     if [ ! -d "$path" ]; then
-        log error "$name" "path does not exist: $path"
+        outcome "$name" error "path does not exist: $path"
         lock_release
         return 3
     fi
     if ! git_in "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        log error "$name" "not a git working tree: $path"
+        outcome "$name" error "not a git working tree: $path"
         lock_release
         return 3
     fi
@@ -671,14 +672,14 @@ sync_locked() {
         esac
         if [ -d "$_gitdir/rebase-merge" ] || [ -d "$_gitdir/rebase-apply" ] ||
            [ -f "$_gitdir/MERGE_HEAD" ] || [ -f "$_gitdir/CHERRY_PICK_HEAD" ]; then
-            log conflict "$name" "an unfinished rebase/merge is in progress, needs a human"
+            outcome "$name" conflict "an unfinished rebase/merge is in progress, needs a human"
             return 2
         fi
     fi
 
     _head=$(git_in "$path" symbolic-ref -q --short HEAD 2>/dev/null || printf '')
     if [ -z "$_head" ]; then
-        log conflict "$name" "HEAD is detached, refusing to sync"
+        outcome "$name" conflict "HEAD is detached, refusing to sync"
         return 2
     fi
     if [ "$_head" != "$t_branch" ]; then
@@ -693,7 +694,7 @@ sync_locked() {
     if [ "$t_mode" != "pull" ]; then
         _out=""
         if ! _out=$(git_in "$path" add -A 2>&1); then
-            log error "$name" "git add -A failed: $_out"
+            outcome "$name" error "git add -A failed: $_out"
             return 1
         fi
         if git_in "$path" diff --cached --quiet 2>/dev/null; then
@@ -714,7 +715,7 @@ sync_locked() {
             _crc=0
             _out=$(git_in "$path" commit -m "$_msg" 2>&1) || _crc=$?
             if [ "$_crc" -ne 0 ]; then
-                log error "$name" "commit failed ($_crc): $_out"
+                outcome "$name" error "commit failed ($_crc): $_out"
                 return 1
             fi
             _committed=1
@@ -764,12 +765,12 @@ sync_locked() {
         fi
         if [ "$_prc" -ne 0 ] && is_transport_error "$_out"; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
-            log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
+            outcome "$name" offline "$_out"
             return 0
         fi
         if [ "$_prc" -ne 0 ] && is_auth_error "$_out"; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
-            log error "$name" "pull failed, authentication refused: $(oneline "$_out")"
+            outcome "$name" error "pull failed, authentication refused: $_out"
             return 1
         fi
         if [ "$_prc" -ne 0 ]; then
@@ -783,7 +784,7 @@ sync_locked() {
         fi
         if [ "$_prc" -ne 0 ]; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
-            log conflict "$name" "pull --rebase failed, aborted: $_out"
+            outcome "$name" conflict "pull --rebase failed, aborted: $_out"
             if [ -n "$t_notify" ] && notify_due "$name"; then
                 _nout=""
                 _nrc=0
@@ -812,16 +813,17 @@ sync_locked() {
                 esac
             fi
             if is_transport_error "$_out"; then
-                log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
+                outcome "$name" offline "$_out"
                 return 0
             fi
-            log error "$name" "push failed ($_prc): $_out"
+            outcome "$name" error "push failed ($_prc): $_out"
             return 1
         fi
     fi
 
     notify_clear "$name"
     mark_ok "$name"
+    rm -f "$OUTCOME_DIR/$(safe_name "$name")" 2>/dev/null || :
     _pulled=1
     [ "$_pull_skipped" -eq 1 ] && _pulled=0
     [ "$t_mode" = "push" ] && _pulled=0
@@ -859,15 +861,39 @@ last_ok() {
     printf '%s' "$_lo_v"
 }
 
+# outcome NAME KIND MESSAGE: log a failed pass and keep it for status.
+# KIND is conflict, error or offline (logged as warn).
+outcome() {
+    if [ "$2" = "offline" ]; then
+        log warn "$1" "network unreachable, retrying next pass: $3"
+    else
+        log "$2" "$1" "$3"
+    fi
+    mkdir -p "$OUTCOME_DIR" 2>/dev/null || :
+    printf '%s\t%s\t%s\n' "$2" "$(epoch)" "$(oneline "$3")" \
+        >"$OUTCOME_DIR/$(safe_name "$1")" 2>/dev/null || :
+    return 0
+}
+
+# stale_limit -> seconds without a sync before a target is stale, or "off".
+# 0 derives it from the interval. Uses the caller's t_*.
+stale_limit() {
+    if [ "$t_stale" = "off" ]; then
+        printf 'off'
+        return 0
+    fi
+    _sl=$t_stale
+    [ "$_sl" -eq 0 ] && _sl=$((t_interval * 12))
+    [ "$_sl" -lt 600 ] && _sl=600
+    printf '%s' "$_sl"
+}
+
 # stale_check NAME: alert when a target has not synced for too long,
 # whatever the cause. Uses the caller's t_*.
 stale_check() {
     _sc_name=$1
-    [ "$t_stale" = "off" ] && return 0
-    _sc_limit=$t_stale
-    # 0 means derive it from the interval.
-    [ "$_sc_limit" -eq 0 ] && _sc_limit=$((t_interval * 12))
-    [ "$_sc_limit" -lt 600 ] && _sc_limit=600
+    _sc_limit=$(stale_limit)
+    [ "$_sc_limit" = "off" ] && return 0
     _sc_last=$(last_ok "$_sc_name")
     if [ "$_sc_last" -eq 0 ]; then
         # First run: start the clock instead of alerting.
@@ -881,7 +907,7 @@ stale_check() {
         _sc_out=""
         _sc_rc=0
         _sc_out=$(run_hook "$t_notify" "$path" "$_sc_name" \
-            "syncto: $_sc_name has not synced in ${_sc_age}s — check the log") || _sc_rc=$?
+            "syncto: $_sc_name has not synced in ${_sc_age}s, see: syncto status") || _sc_rc=$?
         if [ "$_sc_rc" -ne 0 ]; then
             log warn "$_sc_name" "notify hook exited $_sc_rc: $_sc_out"
         fi
@@ -1004,6 +1030,163 @@ cmd_run() {
     return "$_cd_rc"
 }
 
+# human_ago SECONDS -> "just now", "4 min ago", "3 h ago", "2 days ago"
+human_ago() {
+    if [ "$1" -lt 60 ]; then
+        printf 'just now'
+    elif [ "$1" -lt 3600 ]; then
+        printf '%s min ago' $(($1 / 60))
+    elif [ "$1" -lt 172800 ]; then
+        printf '%s h ago' $(($1 / 3600))
+    else
+        printf '%s days ago' $(($1 / 86400))
+    fi
+}
+
+# human_every SECONDS -> "every 10 min", "every 1 h", "every 90 s"
+human_every() {
+    if [ $(($1 % 3600)) -eq 0 ]; then
+        printf 'every %s h' $(($1 / 3600))
+    elif [ $(($1 % 60)) -eq 0 ]; then
+        printf 'every %s min' $(($1 / 60))
+    else
+        printf 'every %s s' "$1"
+    fi
+}
+
+# cd_hint PATH -> a cd command a user can paste
+cd_hint() {
+    case "$1" in
+        *" "*) printf 'cd "%s"' "$1" ;;
+        *) printf 'cd %s' "$(path_encode "$1")" ;;
+    esac
+}
+
+# target_health INDEX: sets H_LEVEL (ok, wait, warn, bad), H_TEXT, H_DETAIL,
+# H_FIX and H_HOW for that target, in words a person can act on.
+target_health() {
+    _th_name=$(tg_name "$1")
+    _th_path=$(tg_path "$1")
+    resolve_opts "$(tg_opts "$1")" || :
+    H_DETAIL=""
+    H_FIX=""
+    if [ "$t_watch" = "on" ]; then
+        H_HOW="on save"
+    else
+        H_HOW=$(human_every "$t_interval")
+    fi
+    case "$t_mode" in
+        push) H_HOW="$H_HOW, push only" ;;
+        pull) H_HOW="$H_HOW, pull only" ;;
+    esac
+
+    if [ ! -d "$_th_path" ]; then
+        H_LEVEL=bad H_TEXT="folder is missing" H_FIX="restore it, or: syncto remove $_th_name"
+        return 0
+    fi
+    if ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        H_LEVEL=bad H_TEXT="not a git repo" H_FIX="git init it, or: syncto remove $_th_name"
+        return 0
+    fi
+
+    _th_now=$(epoch)
+    _th_ok=$(last_ok "$_th_name")
+    _th_kind=""
+    _th_msg=""
+    _th_f="$OUTCOME_DIR/$(safe_name "$_th_name")"
+    if [ -f "$_th_f" ]; then
+        IFS="$TAB" read -r _th_kind _th_since _th_msg <"$_th_f" || :
+    fi
+    _th_cd=$(cd_hint "$_th_path")
+    case "$_th_kind" in
+        conflict)
+            H_LEVEL=bad H_TEXT="needs you"
+            case "$_th_msg" in
+                *"unfinished rebase"*)
+                    H_DETAIL="a rebase or merge was left unfinished"
+                    H_FIX="$_th_cd && git status, then finish or abort it"
+                    ;;
+                *"HEAD is detached"*)
+                    H_DETAIL="HEAD is detached"
+                    H_FIX="$_th_cd && git switch $t_branch"
+                    ;;
+                *)
+                    _th_files=$(printf '%s\n' "$_th_msg" | grep -o 'Merge conflict in [^ ]*' |
+                        sed 's/^Merge conflict in //' | sort -u | paste -sd, - | sed 's/,/, /g')
+                    if [ -n "$_th_files" ]; then
+                        H_DETAIL="both sides changed $_th_files"
+                    else
+                        H_DETAIL="the pull could not be applied: $_th_msg"
+                    fi
+                    H_FIX="$_th_cd && git pull --rebase, fix the files, git rebase --continue"
+                    ;;
+            esac
+            return 0
+            ;;
+        error)
+            H_LEVEL=bad H_TEXT="failing"
+            case "$_th_msg" in
+                *"authentication refused"*)
+                    H_DETAIL="the remote refused the credentials"
+                    H_FIX="check the ssh key (key= option) can push to $t_remote"
+                    ;;
+                *) H_DETAIL=$_th_msg ;;
+            esac
+            return 0
+            ;;
+        offline)
+            H_LEVEL=wait H_TEXT="offline, retrying"
+            if [ "$_th_ok" -gt 0 ]; then
+                H_DETAIL="last synced $(human_ago $((_th_now - _th_ok))). $_th_msg"
+            else
+                H_DETAIL=$_th_msg
+            fi
+            return 0
+            ;;
+    esac
+
+    if [ "$(last_run "$_th_name")" -eq 0 ]; then
+        H_LEVEL=wait H_TEXT="not synced yet"
+        return 0
+    fi
+    _th_limit=$(stale_limit)
+    if [ "$_th_limit" != "off" ] && [ $((_th_now - _th_ok)) -ge "$_th_limit" ]; then
+        H_LEVEL=warn H_TEXT="no sync for $(human_ago $((_th_now - _th_ok)) | sed 's/ ago$//')"
+        H_DETAIL="passes keep being skipped (guard, or edits in progress)"
+        H_FIX="syncto log"
+        return 0
+    fi
+    H_LEVEL=ok H_TEXT="synced $(human_ago $((_th_now - _th_ok)))"
+    return 0
+}
+
+# background_state -> "on", "on+watch", "stopped" (installed, not running) or "off"
+background_state() {
+    case "$(uname -s)" in
+        Darwin)
+            [ -f "$(plist_path)" ] || { printf 'off'; return 0; }
+            launchctl print "gui/$(id -u)/$SYNCTO_LABEL" >/dev/null 2>&1 || { printf 'stopped'; return 0; }
+            if [ -f "$(watch_plist_path)" ] &&
+               launchctl print "gui/$(id -u)/$SYNCTO_LABEL-watch" >/dev/null 2>&1; then
+                printf 'on+watch'
+            else
+                printf 'on'
+            fi
+            ;;
+        Linux)
+            [ -f "$(systemd_dir)/syncto.timer" ] || { printf 'off'; return 0; }
+            systemctl --user is-active --quiet syncto.timer 2>/dev/null || { printf 'stopped'; return 0; }
+            if [ -f "$(systemd_dir)/syncto-watch.service" ] &&
+               systemctl --user is-active --quiet syncto-watch.service 2>/dev/null; then
+                printf 'on+watch'
+            else
+                printf 'on'
+            fi
+            ;;
+        *) printf 'off' ;;
+    esac
+}
+
 cmd_status() {
     targets_load
     if [ "$TG_COUNT" -eq 0 ]; then
@@ -1011,55 +1194,53 @@ cmd_status() {
         return 0
     fi
 
-    _cl_w=4
-    _cl_i=0
-    while [ "$_cl_i" -lt "$TG_COUNT" ]; do
-        _cl_name=$(tg_name "$_cl_i")
-        _cl_n=${#_cl_name}
-        if [ "$_cl_n" -gt "$_cl_w" ]; then
-            _cl_w=$_cl_n
+    C_OK="" C_WAIT="" C_WARN="" C_BAD="" C_DIM="" C_OFF=""
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+        C_OK=$(printf '\033[32m') C_WAIT=$(printf '\033[2m') C_WARN=$(printf '\033[33m')
+        C_BAD=$(printf '\033[31m') C_DIM=$(printf '\033[2m') C_OFF=$(printf '\033[0m')
+    fi
+    _st_cols=${COLUMNS:-$(tput cols 2>/dev/null || printf '100')}
+    case "$_st_cols" in ''|*[!0-9]*) _st_cols=100 ;; esac
+
+    _st_w=4
+    _st_i=0
+    while [ "$_st_i" -lt "$TG_COUNT" ]; do
+        _st_n=$(tg_name "$_st_i")
+        [ "${#_st_n}" -gt "$_st_w" ] && _st_w=${#_st_n}
+        _st_i=$((_st_i + 1))
+    done
+    _st_pad=$(printf "%$((_st_w + 4))s" "")
+    _st_room=$((_st_cols - _st_w - 4))
+    [ "$_st_room" -lt 20 ] && _st_room=20
+
+    _st_i=0
+    while [ "$_st_i" -lt "$TG_COUNT" ]; do
+        target_health "$_st_i"
+        case "$H_LEVEL" in
+            ok) _st_sym="✓" _st_c=$C_OK ;;
+            wait) _st_sym="·" _st_c=$C_WAIT ;;
+            warn) _st_sym="!" _st_c=$C_WARN ;;
+            *) _st_sym="✗" _st_c=$C_BAD ;;
+        esac
+        printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$(tg_name "$_st_i")" \
+            "$_st_c" "$_st_sym" "$H_TEXT" "$C_OFF" "$H_HOW" "$(path_encode "$(tg_path "$_st_i")")"
+        _st_line=$H_DETAIL
+        # Long git output is cut to the terminal width; the fix line never is.
+        if [ -t 1 ] && [ "${#_st_line}" -gt "$_st_room" ]; then
+            _st_line="$(printf '%s' "$_st_line" | cut -c1-$((_st_room - 1)))…"
         fi
-        _cl_i=$((_cl_i + 1))
+        [ -n "$_st_line" ] && printf '%s%s%s%s\n' "$_st_pad" "$C_DIM" "$_st_line" "$C_OFF"
+        [ -n "$H_FIX" ] && printf '%sfix: %s\n' "$_st_pad" "$H_FIX"
+        _st_i=$((_st_i + 1))
     done
 
-    printf "%-${_cl_w}s  %-6s  %-5s  %-8s  %-12s  %-14s  %s\n" \
-        NAME MODE WATCH EVERY BRANCH STATE PATH
-    _cl_i=0
-    while [ "$_cl_i" -lt "$TG_COUNT" ]; do
-        _cl_name=$(tg_name "$_cl_i")
-        _cl_path=$(tg_path "$_cl_i")
-        resolve_opts "$(tg_opts "$_cl_i")" || :
-        _cl_state="ok"
-        if [ ! -d "$_cl_path" ]; then
-            _cl_state="missing"
-        elif ! git_in "$_cl_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            _cl_state="not a repo"
-        else
-            _cl_dirty=$(git_in "$_cl_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-            case "$_cl_dirty" in
-                ''|*[!0-9]*) _cl_dirty=0 ;;
-            esac
-            _cl_ab=$(git_in "$_cl_path" rev-list --left-right --count \
-                "$t_branch...$t_remote/$t_branch" 2>/dev/null || printf '')
-            _cl_arrow=""
-            if [ -n "$_cl_ab" ]; then
-                _cl_ahead=$(printf '%s' "$_cl_ab" | awk '{print $1}')
-                _cl_behind=$(printf '%s' "$_cl_ab" | awk '{print $2}')
-                if [ "${_cl_ahead:-0}" != "0" ] || [ "${_cl_behind:-0}" != "0" ]; then
-                    _cl_arrow=" +$_cl_ahead/-$_cl_behind"
-                fi
-            fi
-            if [ "$_cl_dirty" -eq 0 ]; then
-                _cl_state="clean$_cl_arrow"
-            else
-                _cl_state="$_cl_dirty dirty$_cl_arrow"
-            fi
-        fi
-        printf "%-${_cl_w}s  %-6s  %-5s  %-8s  %-12s  %-14s  %s\n" \
-            "$_cl_name" "$t_mode" "$t_watch" "${t_interval}s" "$t_branch" \
-            "$_cl_state" "$(path_encode "$_cl_path")"
-        _cl_i=$((_cl_i + 1))
-    done
+    printf '\n'
+    case "$(background_state)" in
+        on+watch) printf 'Background: on, %s, and on every save.\n' "$(human_every "$G_INTERVAL")" ;;
+        on) printf 'Background: on, %s.\n' "$(human_every "$G_INTERVAL")" ;;
+        stopped) printf "Background: installed but not running. Restart it with: syncto start\n" ;;
+        *) printf "Background: off. Turn it on with: syncto start\n" ;;
+    esac
     if [ "$TG_MALFORMED" -eq 1 ]; then
         return 3
     fi
@@ -1157,6 +1338,7 @@ cmd_remove() {
     log info "$_cr_name" "removed target"
     rm -f "$LAST_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
     rm -f "$OK_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
+    rm -f "$OUTCOME_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
     return 0
 }
 

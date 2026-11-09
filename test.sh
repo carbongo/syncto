@@ -125,12 +125,12 @@ $(cat "$_targets_file" 2>/dev/null)"
         *) fail "list: shows added target" "$OUT" ;;
     esac
     case "$OUT" in
-        *60s*) ok "list: shows interval option" ;;
-        *) fail "list: shows interval option" "$OUT" ;;
+        *"not synced yet"*"on save"*) ok "status: a new watched target is not synced yet, on save" ;;
+        *) fail "status: a new watched target is not synced yet, on save" "$OUT" ;;
     esac
     case "$OUT" in
-        *proj*sync*on*) ok "list: shows watch=on" ;;
-        *) ok "list: watch column present (loose check)" ;; # format not guaranteed word-for-word
+        *"Background: off"*"syncto start"*) ok "status: says background is off and how to start it" ;;
+        *) fail "status: says background is off and how to start it" "$OUT" ;;
     esac
 
     # options survive a full round trip via --remove/--add cycle: read back the
@@ -198,6 +198,11 @@ test_sync_basic() {
     printf 'hello\n' >"$_t_work/newfile.txt"
     run_syncto "$_t_sb" sync work
     assert_status "sync-basic: sync of new file exits 0" 0 "$RC" "$OUT"
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"✓ synced just now"*) ok "status: a synced target says synced just now" ;;
+        *) fail "status: a synced target says synced just now" "$OUT" ;;
+    esac
 
     _last_msg=$(git -C "$_t_work" log -1 --pretty=%s)
     case "$_last_msg" in
@@ -277,6 +282,14 @@ test_conflict() {
 
     run_syncto "$_t_sb" sync work
     assert_status "conflict: sync exits 2" 2 "$RC" "$OUT"
+    _t_rc=$RC _t_out=$OUT
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"needs you"*"both sides changed conflict.txt"*"fix: "*"git rebase --continue"*)
+            ok "status: a conflict names the file and the fix" ;;
+        *) fail "status: a conflict names the file and the fix" "$OUT" ;;
+    esac
+    RC=$_t_rc OUT=$_t_out
 
     _gitdir="$_t_work/.git"
     if [ -d "$_gitdir/rebase-merge" ] || [ -d "$_gitdir/rebase-apply" ]; then
@@ -359,6 +372,11 @@ test_network_error_not_conflict() {
         *"network unreachable"*) ok "network: logged as warn, not conflict" ;;
         *) fail "network: logged as warn, not conflict" "$_log" ;;
     esac
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"offline, retrying"*"Connection reset by"*) ok "status: offline with the reason" ;;
+        *) fail "status: offline with the reason" "$OUT" ;;
+    esac
 }
 
 test_closed_by_remote_host() {
@@ -390,6 +408,11 @@ test_auth_error_not_conflict() {
     fi
     assert_log "auth: logged as error, not conflict" \
         '*level=error*authentication refused*' '*level=conflict*'
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"failing"*"refused the credentials"*"fix: "*) ok "status: refused credentials say so" ;;
+        *) fail "status: refused credentials say so" "$OUT" ;;
+    esac
 }
 
 test_add_failure_logged() {
