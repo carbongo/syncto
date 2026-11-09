@@ -1259,6 +1259,58 @@ ensure_targets_file() {
     return 0
 }
 
+# opts_from_args MODE ARGS...: validated key=value lines from options given one
+# per argument, comma joined, or any mix. MODE edit accepts "key=" (reset).
+opts_from_args() {
+    _oa_mode=$1
+    shift
+    for _oa_arg in "$@"; do
+        while IFS= read -r _oa_kv; do
+            _oa_kv=$(trim "$_oa_kv")
+            [ -n "$_oa_kv" ] || continue
+            case "$_oa_kv" in
+                *=*) : ;;
+                *) die 3 "options must be key=value, got '$_oa_kv'" ;;
+            esac
+            _oa_k=$(trim "${_oa_kv%%=*}")
+            _oa_v=${_oa_kv#*=}
+            known_key "$_oa_k" || die 3 "unknown option '$_oa_k'"
+            if [ -n "$_oa_v" ] || [ "$_oa_mode" != "edit" ]; then
+                validate_value "$_oa_k" "$_oa_v" || die 3 "bad value for '$_oa_k'"
+            fi
+            printf '%s=%s\n' "$_oa_k" "$_oa_v"
+        done <<EOF
+$(split_opts "$_oa_arg")
+EOF
+    done
+}
+
+# opts_join: key=value lines on stdin -> one comma list, commas in values escaped.
+opts_join() {
+    _oj=""
+    while IFS= read -r _oj_kv; do
+        [ -n "$_oj_kv" ] || continue
+        _oj_kv="${_oj_kv%%=*}=$(printf '%s' "${_oj_kv#*=}" | sed 's/,/\\,/g')"
+        _oj="${_oj:+$_oj,}$_oj_kv"
+    done
+    printf '%s' "$_oj"
+}
+
+# targets_rewrite NAME LINE: replace NAME's line with LINE, or drop it if LINE is empty.
+targets_rewrite() {
+    _tr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
+    while IFS= read -r _tr_line || [ -n "$_tr_line" ]; do
+        _tr_first=${_tr_line%%"$TAB"*}
+        if [ "$_tr_first" = "$1" ] && [ "$_tr_first" != "$_tr_line" ]; then
+            [ -n "$2" ] && printf '%s\n' "$2" >>"$_tr_tmp"
+            continue
+        fi
+        printf '%s\n' "$_tr_line" >>"$_tr_tmp"
+    done <"$TARGETS_FILE"
+    cat "$_tr_tmp" >"$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
+    rm -f "$_tr_tmp"
+}
+
 cmd_add() {
     _ca_name=${1:-}
     _ca_path=${2:-}
@@ -1278,31 +1330,8 @@ cmd_add() {
         die 3 "target '$_ca_name' already exists (remove it first, or edit the file)"
     fi
 
-    # Options may be given one per argument, comma joined, or any mix.
-    _ca_opts=""
-    for _ca_arg in "$@"; do
-        while IFS= read -r _ca_kv; do
-            _ca_kv=$(trim "$_ca_kv")
-            [ -n "$_ca_kv" ] || continue
-            case "$_ca_kv" in
-                *=*) : ;;
-                *) die 3 "options must be key=value, got '$_ca_kv'" ;;
-            esac
-            _ca_k=$(trim "${_ca_kv%%=*}")
-            _ca_v=${_ca_kv#*=}
-            known_key "$_ca_k" || die 3 "unknown option '$_ca_k'"
-            validate_value "$_ca_k" "$_ca_v" || die 3 "bad value for '$_ca_k'"
-            # commas inside a value have to survive the round trip
-            _ca_v=$(printf '%s' "$_ca_v" | sed 's/,/\\,/g')
-            if [ -n "$_ca_opts" ]; then
-                _ca_opts="$_ca_opts,$_ca_k=$_ca_v"
-            else
-                _ca_opts="$_ca_k=$_ca_v"
-            fi
-        done <<EOF
-$(split_opts "$_ca_arg")
-EOF
-    done
+    _ca_kvs=$(opts_from_args add "$@") || exit $?
+    _ca_opts=$(printf '%s\n' "$_ca_kvs" | opts_join)
 
     if ! git -C "$_ca_abs" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         warn "$_ca_abs is not a git working tree (yet): adding anyway"
@@ -1324,16 +1353,7 @@ cmd_remove() {
     targets_load
     tg_index_of "$_cr_name" >/dev/null || die 3 "no such target: $_cr_name"
 
-    _cr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
-    while IFS= read -r _cr_line || [ -n "$_cr_line" ]; do
-        _cr_first=${_cr_line%%"$TAB"*}
-        if [ "$_cr_first" = "$_cr_name" ] && [ "$_cr_first" != "$_cr_line" ]; then
-            continue
-        fi
-        printf '%s\n' "$_cr_line" >>"$_cr_tmp"
-    done <"$TARGETS_FILE"
-    cat "$_cr_tmp" >"$TARGETS_FILE" || { rm -f "$_cr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
-    rm -f "$_cr_tmp"
+    targets_rewrite "$_cr_name" ""
     printf 'Removed %s\n' "$_cr_name"
     log info "$_cr_name" "removed target"
     rm -f "$LAST_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
@@ -1343,10 +1363,38 @@ cmd_remove() {
 }
 
 cmd_edit() {
-    ensure_targets_file
-    _ce_ed=${EDITOR:-${VISUAL:-vi}}
-    # $EDITOR may carry flags, so let the shell split it, but keep the path quoted.
-    sh -c "$_ce_ed \"\$1\"" sh "$TARGETS_FILE"
+    if [ "$#" -eq 0 ]; then
+        ensure_targets_file
+        _ce_ed=${EDITOR:-${VISUAL:-vi}}
+        # $EDITOR may carry flags, so let the shell split it, but keep the path quoted.
+        sh -c "$_ce_ed \"\$1\"" sh "$TARGETS_FILE"
+        return
+    fi
+    _ce_name=$1
+    shift
+    [ "$#" -gt 0 ] || die 3 "usage: syncto edit NAME key=value ...  (plain 'syncto edit' opens the file)"
+    targets_load
+    _ce_i=$(tg_index_of "$_ce_name") || die 3 "no such target: $_ce_name"
+    _ce_new=$(opts_from_args edit "$@") || exit $?
+    _ce_cur=$(split_opts "$(tg_opts "$_ce_i")")
+    while IFS= read -r _ce_kv; do
+        [ -n "$_ce_kv" ] || continue
+        _ce_cur=$(printf '%s\n' "$_ce_cur" | grep -v "^${_ce_kv%%=*}=" || :)
+        if [ -n "${_ce_kv#*=}" ]; then
+            _ce_cur=$(printf '%s\n%s' "$_ce_cur" "$_ce_kv")
+        fi
+    done <<EOF
+$_ce_new
+EOF
+    _ce_opts=$(printf '%s\n' "$_ce_cur" | opts_join)
+    targets_rewrite "$_ce_name" \
+        "$(printf '%s\t%s\t%s' "$_ce_name" "$(path_encode "$(tg_path "$_ce_i")")" "$_ce_opts")"
+    printf 'Updated %s: %s\n' "$_ce_name" "${_ce_opts:-all defaults}"
+    log info "$_ce_name" "edited target [$_ce_opts]"
+    case "$_ce_new" in
+        *watch=*|*remote_poll=*) printf "Run 'syncto start' so background syncing picks up the change.\n" ;;
+    esac
+    return 0
 }
 
 cmd_log() {
@@ -1928,6 +1976,7 @@ USAGE
 COMMANDS
   status                    how every sync is doing (also: plain 'syncto')
   add NAME PATH [K=V ...]   start syncing a repo
+  edit NAME K=V ...         change a sync's options; K= resets one to its default
   edit                      open the targets file in \$EDITOR
   remove NAME               stop syncing a repo; its files stay
   sync [NAME]               sync now: every repo, or just NAME

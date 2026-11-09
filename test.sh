@@ -918,10 +918,49 @@ $(cat "$_t_log" 2>/dev/null)"
 }
 
 # ---------------------------------------------------------------------------
+# edit NAME key=value
+# ---------------------------------------------------------------------------
+
+test_edit_options() {
+    _t_sb=$(new_sandbox)
+    _t_target="$_t_sb/home/proj"
+    mkdir -p "$_t_target"
+    git_q "$_t_target" init
+    _t_file="$_t_sb/home/.config/syncto/targets"
+    run_syncto "$_t_sb" add proj "$_t_target" "interval=60,prefix=p"
+
+    run_syncto "$_t_sb" edit proj watch=on "notify=echo a\,b"
+    assert_status "edit: exits 0" 0 "$RC" "$OUT"
+    _t_line=$(grep -F "$(printf 'proj\t')" "$_t_file")
+    case "$_t_line" in
+        *interval=60*prefix=p*watch=on*'notify=echo a\,b'*) ok "edit: merges new options, keeps the rest, escapes commas" ;;
+        *) fail "edit: merges new options, keeps the rest, escapes commas" "$_t_line" ;;
+    esac
+    case "$OUT" in
+        *"syncto start"*) ok "edit: a watch change says to run syncto start" ;;
+        *) fail "edit: a watch change says to run syncto start" "$OUT" ;;
+    esac
+
+    run_syncto "$_t_sb" edit proj interval=
+    _t_line=$(grep -F "$(printf 'proj\t')" "$_t_file")
+    case "$_t_line" in
+        *interval=*) fail "edit: key= resets an option" "$_t_line" ;;
+        *prefix=p*) ok "edit: key= resets an option" ;;
+        *) fail "edit: key= resets an option" "$_t_line" ;;
+    esac
+
+    run_syncto "$_t_sb" edit proj colour=blue
+    assert_status "edit: an unknown option exits 3" 3 "$RC" "$OUT"
+    run_syncto "$_t_sb" edit nope watch=on
+    assert_status "edit: an unknown target exits 3" 3 "$RC" "$OUT"
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
 test_config_roundtrip
+test_edit_options
 test_sync_basic
 test_conflict
 test_network_error_not_conflict
