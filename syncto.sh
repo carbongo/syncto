@@ -181,7 +181,7 @@ split_opts() {
 # Is this a known option key?
 known_key() {
     case "$1" in
-        interval|watch|mode|branch|remote|prefix|guard|notify|peer|stale) return 0 ;;
+        interval|watch|mode|branch|remote|prefix|guard|notify|peer|stale|paused) return 0 ;;
         key|ssh|GIT_SSH_COMMAND|log|debounce|log_max|remote_poll) return 0 ;;
         *) return 1 ;;
     esac
@@ -203,10 +203,10 @@ validate_value() {
                 return 1
             fi
             ;;
-        watch)
+        watch|paused)
             case "$2" in
                 on|off) : ;;
-                *) warn "watch must be 'on' or 'off', got '$2'"; return 1 ;;
+                *) warn "$1 must be 'on' or 'off', got '$2'"; return 1 ;;
             esac
             ;;
         remote_poll)
@@ -253,6 +253,7 @@ G_INTERVAL=120
 G_STALE=0
 G_REMOTE_POLL=0
 G_WATCH=off
+G_PAUSED=off
 G_DEBOUNCE=2
 G_MODE=sync
 G_BRANCH=main
@@ -295,6 +296,7 @@ load_config() {
         case "$_lc_k" in
             interval) G_INTERVAL=$_lc_v ;;
             watch)    G_WATCH=$_lc_v ;;
+            paused)   G_PAUSED=$_lc_v ;;
             debounce) G_DEBOUNCE=$_lc_v ;;
             log_max)  LOG_MAX=$_lc_v ;;
             mode)     G_MODE=$_lc_v ;;
@@ -378,6 +380,12 @@ tg_name() { eval "printf '%s' \"\${TG_NAME_$1}\""; }
 tg_path() { eval "printf '%s' \"\${TG_PATH_$1}\""; }
 tg_opts() { eval "printf '%s' \"\${TG_OPTS_$1}\""; }
 
+# tg_paused INDEX -> 0 if the target has paused=on (sets t_* for it)
+tg_paused() {
+    resolve_opts "$(tg_opts "$1")" || :
+    [ "$t_paused" = "on" ]
+}
+
 tg_index_of() {
     # prints the index of target NAME, or nothing
     _ti_i=0
@@ -395,6 +403,7 @@ tg_index_of() {
 resolve_opts() {
     t_interval=$G_INTERVAL
     t_watch=$G_WATCH
+    t_paused=$G_PAUSED
     t_debounce=$G_DEBOUNCE
     t_mode=$G_MODE
     t_branch=$G_BRANCH
@@ -436,6 +445,7 @@ resolve_opts() {
         case "$_ro_k" in
             interval) t_interval=$_ro_v ;;
             watch)    t_watch=$_ro_v ;;
+            paused)   t_paused=$_ro_v ;;
             debounce) t_debounce=$_ro_v ;;
             mode)     t_mode=$_ro_v ;;
             branch)   t_branch=$_ro_v ;;
@@ -970,6 +980,11 @@ cmd_sync() {
             continue
         fi
         _cs_ran=1
+        if [ -z "$_cs_only" ] && tg_paused "$_cs_i"; then
+            log info "$_cs_name" "paused, skipping"
+            _cs_i=$((_cs_i + 1))
+            continue
+        fi
         _cs_one=0
         # A failure in one target must never stop the others.
         sync_one "$_cs_i" || _cs_one=$?
@@ -1007,6 +1022,10 @@ cmd_run() {
     while [ "$_cd_i" -lt "$TG_COUNT" ]; do
         _cd_name=$(tg_name "$_cd_i")
         resolve_opts "$(tg_opts "$_cd_i")"
+        if [ "$t_paused" = "on" ]; then
+            _cd_i=$((_cd_i + 1))
+            continue
+        fi
         _cd_last=$(last_run "$_cd_name")
         _cd_age=$((_cd_now - _cd_last))
         # Grace window (10% of the interval, 5..30 s): schedulers drift, and an
@@ -1098,6 +1117,11 @@ target_health() {
         IFS="$TAB" read -r _th_kind _th_since _th_msg <"$_th_f" || :
     fi
     _th_cd=$(cd_hint "$_th_path")
+    if [ "$t_paused" = "on" ] && [ "$_th_kind" != "conflict" ] && [ "$_th_kind" != "error" ]; then
+        H_LEVEL=wait H_TEXT="paused"
+        H_FIX="resume: syncto edit $_th_name paused=off"
+        return 0
+    fi
     case "$_th_kind" in
         conflict)
             H_LEVEL=bad H_TEXT="needs you"
@@ -1474,6 +1498,10 @@ watch_flush() {
             eval "W_PEND_$_wf_i=0"
             _wf_idx=$(w_idx "$_wf_i")
             _wf_name=$(tg_name "$_wf_idx")
+            if tg_paused "$_wf_idx"; then
+                _wf_i=$((_wf_i + 1))
+                continue
+            fi
             # A clean tree means only ignored paths changed: skip the network
             # round trip. Inbound still arrives via peer= and the interval.
             if [ -z "$(git -C "$(w_path "$_wf_i")" status --porcelain 2>/dev/null | head -n 1)" ]; then
@@ -1665,7 +1693,7 @@ poll_loop() {
             # shellcheck disable=SC2154 # set by eval
             if [ $((_pl_now - _pl_last)) -ge "$_pl_every" ]; then
                 eval "P_LAST_$_pl_i=\$_pl_now"
-                if remote_moved "$_pl_idx"; then
+                if ! tg_paused "$_pl_idx" && remote_moved "$_pl_idx"; then
                     _pl_name=$(tg_name "$_pl_idx")
                     log info "$_pl_name" "remote_poll: $t_remote/$t_branch moved, syncing"
                     _pl_one=0
@@ -1992,6 +2020,7 @@ COMMANDS
 TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   interval=SECONDS      minimum seconds between scheduled syncs   [$G_INTERVAL]
   watch=on|off          sync within seconds of a file changing    [$G_WATCH]
+  paused=on|off         skip in background syncing and plain 'sync' [$G_PAUSED]
   mode=sync|push|pull   commit+pull+push / commit+push / pull only [$G_MODE]
   branch=NAME           branch to pull and push                   [$G_BRANCH]
   remote=NAME           remote to pull and push                   [$G_REMOTE]

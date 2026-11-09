@@ -36,6 +36,7 @@ Several repos in one run exit with the worst code, in the order 2, 3, 1, 4, 0.
 |---|---|
 | ✓ synced 2 min ago | the last pass succeeded |
 | · not synced yet | no pass has run |
+| · paused | `paused=on`; a fix line says how to resume |
 | · offline, retrying | the remote is unreachable; every pass retries |
 | ! no sync for 5 h | passes keep being skipped (`guard=`, edits in progress) past `stale=` |
 | ✗ needs you | a fix line says what to run |

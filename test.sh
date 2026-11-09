@@ -956,11 +956,69 @@ test_edit_options() {
 }
 
 # ---------------------------------------------------------------------------
+# paused=on
+# ---------------------------------------------------------------------------
+
+test_paused() {
+    _t_sb=$(new_sandbox)
+    mkdir -p "$_t_sb/home"
+    _t_bare="$_t_sb/remote.git"
+    _t_work="$_t_sb/home/work"
+    git init -q --bare "$_t_bare"
+    git -C "$_t_bare" symbolic-ref HEAD refs/heads/main
+    git clone -q "$_t_bare" "$_t_work" 2>/dev/null
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" commit --allow-empty -m init
+    git_q "$_t_work" push -q origin main
+    git -C "$_t_work" config user.email t@example.invalid
+    git -C "$_t_work" config user.name t
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,remote=origin,prefix=t,paused=on"
+
+    printf 'x\n' >"$_t_work/a.txt"
+    run_syncto "$_t_sb" sync
+    assert_status "paused: plain sync exits 0" 0 "$RC" "$OUT"
+    if [ -n "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: plain sync leaves it alone"
+    else
+        fail "paused: plain sync leaves it alone" "a.txt was committed"
+    fi
+    run_syncto "$_t_sb" run
+    if [ -n "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: a scheduled pass leaves it alone"
+    else
+        fail "paused: a scheduled pass leaves it alone" "a.txt was committed"
+    fi
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"paused"*"paused=off"*) ok "status: says paused and how to resume" ;;
+        *) fail "status: says paused and how to resume" "$OUT" ;;
+    esac
+
+    run_syncto "$_t_sb" sync work
+    assert_status "paused: sync NAME still syncs it" 0 "$RC" "$OUT"
+    if [ -z "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: sync NAME commits the change"
+    else
+        fail "paused: sync NAME commits the change" "$(git -C "$_t_work" status --porcelain)"
+    fi
+
+    run_syncto "$_t_sb" edit work paused=off
+    printf 'y\n' >"$_t_work/b.txt"
+    run_syncto "$_t_sb" sync
+    if [ -z "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: resumed target syncs again"
+    else
+        fail "paused: resumed target syncs again" "b.txt left uncommitted"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
 test_config_roundtrip
 test_edit_options
+test_paused
 test_sync_basic
 test_conflict
 test_network_error_not_conflict
