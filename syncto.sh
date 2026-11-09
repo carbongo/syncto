@@ -1528,15 +1528,15 @@ cmd_watch() {
 
     if command -v fswatch >/dev/null 2>&1; then
         log info "" "watching ${W_COUNT} target(s) with fswatch"
-        printf 'syncto: watching %s target(s) with fswatch — ctrl-c to stop\n' "$W_COUNT" >&2
+        printf 'syncto: watching %s target(s) with fswatch, ctrl-c to stop\n' "$W_COUNT" >&2
         watch_loop_fswatch "$@"
     elif command -v inotifywait >/dev/null 2>&1; then
         log info "" "watching ${W_COUNT} target(s) with inotifywait"
-        printf 'syncto: watching %s target(s) with inotifywait — ctrl-c to stop\n' "$W_COUNT" >&2
+        printf 'syncto: watching %s target(s) with inotifywait, ctrl-c to stop\n' "$W_COUNT" >&2
         watch_loop_inotify "$@"
     else
         log info "" "watching ${W_COUNT} target(s) by polling"
-        printf 'syncto: no fswatch/inotifywait found — polling every %ss — ctrl-c to stop\n' "$W_DEBOUNCE" >&2
+        printf 'syncto: no fswatch or inotifywait found: polling every %ss, ctrl-c to stop\n' "$W_DEBOUNCE" >&2
         watch_loop_poll
     fi
     return 0
