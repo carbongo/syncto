@@ -1,43 +1,15 @@
-# syncto example global config
-#
-# Copy to ${XDG_CONFIG_HOME:-$HOME/.config}/syncto/config. These are the defaults
-# every target falls back to when its own options column doesn't override them.
-# The list of repos to sync lives in a separate file — see targets.example.
-# Nothing in this repo is read at runtime; real config lives outside it.
-#
-# Format: key=value, one per line. Blank lines and #-comments are ignored.
+# syncto global config: defaults for every repo, one key=value per line.
+# Every key and what it does: syncto help
 
 interval=120
 watch=off
-
-# Quiet period a watcher waits after a change before syncing, so a burst of
-# saves becomes one sync. Raise it for editors that write continuously while
-# you type (Obsidian, some IDEs); one watcher process covers every watched
-# target and uses the largest debounce among them.
 debounce=2
-# How long a target may go without a single successful sync before the notify
-# hook is called. A failing guard or a permanently dirty tree is skipped quietly
-# on every pass by design; this is what eventually says so out loud. 0 derives it
-# from the interval (12x, never under 600s); 'off' disables the alarm.
 stale=0
 mode=sync
 branch=main
 remote=origin
 log=~/.local/state/syncto/syncto.log
-
-# Rotate the log to <log>.1 once it grows past this many bytes; 0 disables.
-# Checked once per run. One generation is kept.
 log_max=2097152
 
-# Optional: schedulers (launchd/systemd) run with no ssh-agent in scope. If a target
-# pushes/pulls over SSH, point git at a passphrase-less key explicitly instead of
-# relying on an agent that won't be there:
-#
-#   key=~/.ssh/example_deploy_key
-#
-# syncto turns that into GIT_SSH_COMMAND="ssh -i ~/.ssh/example_deploy_key \
-#   -o IdentitiesOnly=yes" for that target's git commands. You can also set
-# GIT_SSH_COMMAND directly here (or per-target) for full control, e.g. a nonstandard
-# port or a custom known_hosts file:
-#
-#   GIT_SSH_COMMAND=ssh -i ~/.ssh/example_deploy_key -o IdentitiesOnly=yes -p 2222
+# launchd and systemd have no ssh-agent: name a passphrase-less key for ssh remotes.
+# key=~/.ssh/example_deploy_key
