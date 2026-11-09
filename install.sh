@@ -6,6 +6,7 @@
 set -eu
 
 PROG_NAME="syncto"
+RAW_URL="https://raw.githubusercontent.com/carbongo/syncto/main"
 SHARE_DIR="$HOME/.local/share/$PROG_NAME"
 BIN_DIR="$HOME/.local/bin"
 BIN_PATH="$BIN_DIR/$PROG_NAME"
@@ -64,9 +65,16 @@ case "$os" in
   *) echo "syncto: warning: unrecognized OS '$os', proceeding anyway" >&2 ;;
 esac
 
+# Piped from curl there is no checkout next to us: fetch the two files.
 if [ -z "$script_dir" ] || [ ! -f "$script_dir/syncto.sh" ]; then
-  echo "syncto: could not find syncto.sh next to install.sh (looked in '$script_dir')" >&2
-  exit 1
+  script_dir=$(mktemp -d) || exit 1
+  trap 'rm -rf "$script_dir"' EXIT
+  for f in syncto.sh config.example; do
+    curl -fsSL "$RAW_URL/$f" -o "$script_dir/$f" || {
+      echo "syncto: could not download $RAW_URL/$f" >&2
+      exit 1
+    }
+  done
 fi
 
 mkdir -p "$SHARE_DIR"
@@ -81,21 +89,8 @@ echo "syncto: installed to $SHARE_DIR, linked at $BIN_PATH"
 
 mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG_FILE" ]; then
-  if [ -n "$script_dir" ] && [ -f "$script_dir/config.example" ]; then
-    cp "$script_dir/config.example" "$CONFIG_FILE"
-    echo "syncto: seeded $CONFIG_FILE from config.example"
-  else
-    cat > "$CONFIG_FILE" <<EOF
-# syncto global config: key=value, one per line.
-interval=120
-watch=off
-mode=sync
-branch=main
-remote=origin
-log=\$HOME/.local/state/syncto/syncto.log
-EOF
-    echo "syncto: wrote default config to $CONFIG_FILE (no config.example found)"
-  fi
+  cp "$script_dir/config.example" "$CONFIG_FILE"
+  echo "syncto: seeded $CONFIG_FILE"
 else
   echo "syncto: config already present at $CONFIG_FILE, leaving it alone"
 fi
