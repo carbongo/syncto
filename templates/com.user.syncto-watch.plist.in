@@ -22,7 +22,7 @@
     <array>
         <string>/bin/bash</string>
         <string>@EXEC@</string>
-        <string>-w</string>
+        <string>watch</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

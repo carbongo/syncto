@@ -13,7 +13,7 @@ PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
 # Best-effort: if a scheduler unit was installed, remove it first while the
 # syncto binary is still around to do so.
 if [ -x "$BIN_PATH" ] || [ -L "$BIN_PATH" ]; then
-  "$BIN_PATH" --uninstall-service 2>/dev/null || true
+  "$BIN_PATH" stop 2>/dev/null || true
 fi
 
 if [ -L "$BIN_PATH" ] || [ -f "$BIN_PATH" ]; then

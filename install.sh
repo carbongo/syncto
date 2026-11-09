@@ -1,7 +1,7 @@
 #!/bin/sh
 # syncto installer: copies syncto.sh to ~/.local/share/syncto, links
 # ~/.local/bin/syncto, seeds a config and puts ~/.local/bin on PATH. Idempotent.
-# Usage: ./install.sh [--uninstall]. Scheduler units: syncto --install-service
+# Usage: ./install.sh [--uninstall]. Scheduler units: syncto start
 
 set -eu
 
@@ -120,9 +120,9 @@ cat <<EOF
 
 Next steps:
   1. Restart your shell, or run:  export PATH="$BIN_DIR:\$PATH"
-  2. Add a sync target:           syncto -a <name> <path>
+  2. Add a sync target:           syncto add <name> <path>
   3. Check status any time:       syncto
-  4. Install a scheduler unit:    syncto --install-service
-     (schedulers run without an ssh-agent — if a target pushes over ssh,
-     set a key= option for that target so pushes don't hang)
+  4. Install a scheduler unit:    syncto start
+     (schedulers have no ssh-agent: if a target pushes over ssh, give it
+     a key= option so pushes don't hang)
 EOF

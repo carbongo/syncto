@@ -32,7 +32,7 @@
     <array>
         <string>/bin/bash</string>
         <string>@EXEC@</string>
-        <string>-d</string>
+        <string>run</string>
     </array>
     <key>StartInterval</key>
     <integer>@INTERVAL@</integer>

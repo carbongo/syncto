@@ -8,7 +8,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=@EXEC@ -w
+ExecStart=@EXEC@ watch
 # Come back after a crash; the delay stops a crash loop spinning the CPU.
 Restart=always
 RestartSec=5

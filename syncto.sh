@@ -914,7 +914,7 @@ last_run() {
 
 no_targets_notice() {
     printf 'No targets configured yet.\n' >&2
-    printf 'Add one with:  syncto --add NAME PATH [key=value ...]\n' >&2
+    printf 'Add one with:  syncto add NAME PATH [key=value ...]\n' >&2
 }
 
 cmd_sync() {
@@ -967,7 +967,7 @@ cmd_sync() {
     return "$_cs_rc"
 }
 
-cmd_daemon() {
+cmd_run() {
     targets_load
     if [ "$TG_COUNT" -eq 0 ]; then
         log info "" "no targets configured"
@@ -1005,7 +1005,7 @@ cmd_daemon() {
     return "$_cd_rc"
 }
 
-cmd_list() {
+cmd_status() {
     targets_load
     if [ "$TG_COUNT" -eq 0 ]; then
         no_targets_notice
@@ -1082,8 +1082,8 @@ ensure_targets_file() {
 cmd_add() {
     _ca_name=${1:-}
     _ca_path=${2:-}
-    [ -n "$_ca_name" ] || die 3 "usage: syncto --add NAME PATH [key=value ...]"
-    [ -n "$_ca_path" ] || die 3 "usage: syncto --add NAME PATH [key=value ...]"
+    [ -n "$_ca_name" ] || die 3 "usage: syncto add NAME PATH [key=value ...]"
+    [ -n "$_ca_path" ] || die 3 "usage: syncto add NAME PATH [key=value ...]"
     shift 2 || :
 
     case "$_ca_name" in
@@ -1125,7 +1125,7 @@ EOF
     done
 
     if ! git -C "$_ca_abs" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        warn "$_ca_abs is not a git working tree (yet) — adding anyway"
+        warn "$_ca_abs is not a git working tree (yet): adding anyway"
     fi
 
     ensure_targets_file
@@ -1138,7 +1138,7 @@ EOF
 
 cmd_remove() {
     _cr_name=${1:-}
-    [ -n "$_cr_name" ] || die 3 "usage: syncto --remove NAME"
+    [ -n "$_cr_name" ] || die 3 "usage: syncto remove NAME"
     [ -f "$TARGETS_FILE" ] || die 3 "no such target: $_cr_name"
 
     targets_load
@@ -1276,7 +1276,7 @@ cmd_watch() {
         if [ -n "${1:-}" ]; then
             die 3 "no such target: $1"
         fi
-        die 3 "no targets have watch=on or remote_poll; add one with 'syncto --add NAME PATH watch=on'"
+        die 3 "no targets have watch=on or remote_poll; add one with 'syncto add NAME PATH watch=on'"
     fi
 
     if [ "$P_COUNT" -gt 0 ]; then
@@ -1496,7 +1496,7 @@ sched_argv() {
     if [ ! -x "$_sa_exec" ] || [ "$(uname -s)" = "Darwin" ]; then
         printf '%s\n' "$SHELL_BIN"
     fi
-    printf '%s\n-d\n' "$_sa_exec"
+    printf '%s\nrun\n' "$_sa_exec"
 }
 
 plist_path() {
@@ -1562,7 +1562,7 @@ install_launchd() {
                 printf '    <key>ProgramArguments</key>\n    <array>\n'
                 printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
                 printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
-                printf '        <string>-w</string>\n'
+                printf '        <string>watch</string>\n'
                 printf '    </array>\n'
                 printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
                 printf '        <key>PATH</key>\n        <string>%s</string>\n' \
@@ -1689,7 +1689,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$(sched_exec) -w
+ExecStart=$(sched_exec) watch
 Restart=always
 RestartSec=5
 
@@ -1747,15 +1747,15 @@ uninstall_systemd() {
     return 0
 }
 
-cmd_install_service() {
+cmd_start() {
     case "$(uname -s)" in
         Darwin) install_launchd ;;
         Linux) install_systemd ;;
-        *) die 1 "no scheduler support for $(uname -s); run 'syncto --daemon' from cron" ;;
+        *) die 1 "no scheduler support for $(uname -s); run 'syncto run' from cron" ;;
     esac
 }
 
-cmd_uninstall_service() {
+cmd_stop() {
     case "$(uname -s)" in
         Darwin) uninstall_launchd ;;
         Linux) uninstall_systemd ;;
@@ -1769,29 +1769,29 @@ cmd_uninstall_service() {
 
 usage() {
     cat <<EOF
-syncto $SYNCTO_VERSION — unattended git sync for working copies you care about
+syncto $SYNCTO_VERSION: keeps git repos in sync by itself (commit, pull, push)
 
 USAGE
-  syncto [-v] [ACTION]
+  syncto [-v] [COMMAND]
 
-ACTIONS
-  (no action)                   list every target with its status
-  -s, --sync [NAME]             sync now — all targets, or just NAME
-  -a, --add NAME PATH [K=V...]  add a target
-  -r, --remove NAME             remove a target
-  -e, --edit                    open the targets file in \$EDITOR
-  -w, --watch [NAME]            foreground watch + remote poll loop (NAME, else every watch=on/remote_poll target)
-  -d, --daemon                  run one scheduled pass — what launchd/systemd calls
-  -i, --install-service         install the launchd agent or systemd user timer
-  -u, --uninstall-service       remove it again
-  -L, --log                     show the tail of the log
-  -v, --verbose                 also echo log lines to stderr (use with any action)
-  -h, --help                    this text
-  -V, --version                 print the version
+COMMANDS
+  status                    how every sync is doing (also: plain 'syncto')
+  add NAME PATH [K=V ...]   start syncing a repo
+  edit                      open the targets file in \$EDITOR
+  remove NAME               stop syncing a repo; its files stay
+  sync [NAME]               sync now: every repo, or just NAME
+  log                       recent activity
+  start                     sync in the background (launchd or systemd)
+  stop                      stop syncing in the background
+  run                       one scheduled pass; what 'start' schedules
+  watch [NAME]              the watch loop; what 'start' runs when a repo has watch=on
+  help, version
+
+  -v, --verbose             also print log lines (works with any command)
 
 TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   interval=SECONDS      minimum seconds between scheduled syncs   [$G_INTERVAL]
-  watch=on|off          include in a bare 'syncto --watch'       [$G_WATCH]
+  watch=on|off          sync within seconds of a file changing    [$G_WATCH]
   mode=sync|push|pull   commit+pull+push / commit+push / pull only [$G_MODE]
   branch=NAME           branch to pull and push                   [$G_BRANCH]
   remote=NAME           remote to pull and push                   [$G_REMOTE]
@@ -1812,7 +1812,7 @@ FILES
   $(path_encode "$CONFIG_FILE")
       global defaults, one key=value per line: any target option, plus
       log=PATH             where to write the log
-      key=PATH             ssh key for git — launchd and systemd have no
+      key=PATH             ssh key for git: launchd and systemd have no
                            ssh-agent, so name the key instead of relying on one
       GIT_SSH_COMMAND=CMD  a full ssh command; wins over key= (alias: ssh=)
 
@@ -1823,15 +1823,15 @@ FILES
 EXIT CODES
   0  ok
   1  error
-  2  conflict — a human has to look at it
+  2  conflict: a human has to look at it
   3  configuration error
   4  another run holds the lock
 
 EXAMPLES
-  syncto --add notes "\$HOME/notes" interval=300,watch=on,prefix=notes
-  syncto --add site "\$HOME/site" mode=pull,branch=trunk
-  syncto --sync notes
-  syncto --install-service
+  syncto add notes ~/notes watch=on,prefix=notes
+  syncto add site ~/site mode=pull,branch=trunk
+  syncto start
+  syncto sync notes
 EOF
 }
 
@@ -1888,52 +1888,36 @@ main() {
     fi
 
     case "$action" in
-        "")
-            cmd_list
-            ;;
-        -s|--sync)
-            cmd_sync "${1:-}"
-            ;;
-        -a|--add)
-            cmd_add "$@"
-            ;;
-        -r|--remove)
-            cmd_remove "${1:-}"
-            ;;
-        -e|--edit)
-            cmd_edit
-            ;;
-        -w|--watch)
+        ""|status) cmd_status ;;
+        add) cmd_add "$@" ;;
+        edit) cmd_edit "$@" ;;
+        remove) cmd_remove "${1:-}" ;;
+        sync) cmd_sync "${1:-}" ;;
+        log) cmd_log ;;
+        start) cmd_start ;;
+        stop) cmd_stop ;;
+        watch)
             DAEMON=1
             cmd_watch "${1:-}"
             ;;
-        -d|--daemon)
+        run)
             DAEMON=1
-            cmd_daemon
+            cmd_run
             ;;
-        -i|--install-service)
-            cmd_install_service
-            ;;
-        -u|--uninstall-service)
-            cmd_uninstall_service
-            ;;
-        -L|--log)
-            cmd_log
-            ;;
-        -h|--help)
-            usage
-            ;;
-        -V|--version)
-            printf 'syncto %s\n' "$SYNCTO_VERSION"
+        help|-h|--help) usage ;;
+        version|-V|--version) printf 'syncto %s\n' "$SYNCTO_VERSION" ;;
+        -s|--sync|-a|--add|-r|--remove|-e|--edit|-w|--watch|-d|--daemon|\
+        -i|--install-service|-u|--uninstall-service|-L|--log)
+            die 1 "'$action' was replaced by commands (see 'syncto help'); if launchd or systemd runs this, update it with 'syncto start'"
             ;;
         -*)
             warn "unknown option: $action"
-            printf "Try 'syncto --help'.\n" >&2
+            printf "Try 'syncto help'.\n" >&2
             return 1
             ;;
         *)
-            warn "unknown action: $action"
-            printf "Try 'syncto --help'.\n" >&2
+            warn "unknown command: $action"
+            printf "Try 'syncto help'.\n" >&2
             return 1
             ;;
     esac
