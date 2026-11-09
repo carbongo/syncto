@@ -101,8 +101,11 @@ was in before the pull attempt, runs the target's
 `notify=<shell cmd>` hook if one is set, and exits 2 (the dedicated "needs a human"
 exit code, distinct from a generic error).
 
-A transport failure (DNS, timeout, `Connection reset/closed by …`) is not a conflict: it
-logs `warn`, exits 0 and does not notify — the next pass catches up.
+A transport failure (DNS, timeout, `Connection reset/closed by …`) on pull or push is not a
+conflict: it logs `warn`, exits 0 and does not notify — the next pass catches up.
+
+An auth failure (`Permission denied (publickey)`, `Authentication failed`) is not a
+conflict either: it logs `error`, exits 1 and does not notify; `stale=` reports it if it lasts.
 
 This is a hard rule, not a default that more code could someday override: `syncto`
 never guesses which side of a conflict is "right". Silent auto-resolution (`-X ours`,

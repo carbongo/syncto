@@ -326,7 +326,9 @@ test_conflict() {
 # network failure: a dropped connection is not a conflict
 # ---------------------------------------------------------------------------
 
-test_network_error_not_conflict() {
+# fake_ssh_target MESSAGE [EXTRA_OPTIONS]: sets _t_sb/_t_work to a target
+# whose ssh always fails with MESSAGE on stderr, the way a real one would.
+fake_ssh_target() {
     _t_sb=$(new_sandbox)
     mkdir -p "$_t_sb/home/work"
     _t_work="$_t_sb/home/work"
@@ -334,11 +336,27 @@ test_network_error_not_conflict() {
     git_q "$_t_work" checkout -B main
     git_q "$_t_work" commit --allow-empty -m init
     git_q "$_t_work" remote add origin "ssh://git@example.invalid/x.git"
-    # Stand-in ssh that fails the way GitHub's ssh-over-443 does when it drops us.
-    printf '#!/bin/sh\necho "Connection reset by 140.82.121.36 port 443" >&2\nexit 255\n' >"$_t_sb/fake-ssh"
+    printf '#!/bin/sh\necho "%s" >&2\nexit 255\n' "$1" >"$_t_sb/fake-ssh"
     chmod +x "$_t_sb/fake-ssh"
+    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t,ssh=$_t_sb/fake-ssh,notify=touch $_t_sb/notified${2:-}"
+}
 
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t,ssh=$_t_sb/fake-ssh,notify=touch $_t_sb/notified"
+# assert_log NAME PATTERN [FORBIDDEN]: the sandbox log matches PATTERN and,
+# if given, does not match FORBIDDEN.
+assert_log() {
+    _al_log=$(cat "$_t_sb/home/.local/state/syncto/syncto.log" 2>/dev/null)
+    case "$_al_log" in
+        ${3:-__none__}) fail "$1" "$_al_log"; return 0 ;;
+    esac
+    case "$_al_log" in
+        $2) ok "$1" ;;
+        *) fail "$1" "$_al_log" ;;
+    esac
+}
+
+test_network_error_not_conflict() {
+    # Fails the way GitHub's ssh-over-443 does when it drops us.
+    fake_ssh_target "Connection reset by 140.82.121.36 port 443"
     run_syncto "$_t_sb" --sync work
     assert_status "network: dropped connection exits 0" 0 "$RC" "$OUT"
     if [ -e "$_t_sb/notified" ]; then
@@ -352,6 +370,46 @@ test_network_error_not_conflict() {
         *"network unreachable"*) ok "network: logged as warn, not conflict" ;;
         *) fail "network: logged as warn, not conflict" "$_log" ;;
     esac
+}
+
+test_closed_by_remote_host() {
+    fake_ssh_target "Connection to example.invalid closed by remote host."
+    run_syncto "$_t_sb" --sync work
+    assert_status "network: closed by remote host exits 0" 0 "$RC" "$OUT"
+    assert_log "network: closed by remote host logged as warn, not conflict" \
+        '*network unreachable*' '*level=conflict*'
+}
+
+test_push_network_error() {
+    fake_ssh_target "ssh: connect to host example.invalid port 443: Operation timed out" ",mode=push"
+    run_syncto "$_t_sb" --sync work
+    assert_status "network: push timeout exits 0" 0 "$RC" "$OUT"
+    assert_log "network: push timeout logged as warn, not error" \
+        '*network unreachable*' '*level=error*'
+    assert_log "network: push timeout is not logged as a success" \
+        '*network unreachable*' '*sync ok*'
+}
+
+test_auth_error_not_conflict() {
+    fake_ssh_target "git@example.invalid: Permission denied (publickey)."
+    run_syncto "$_t_sb" --sync work
+    assert_status "auth: refused key exits 1" 1 "$RC" "$OUT"
+    if [ -e "$_t_sb/notified" ]; then
+        fail "auth: refused key does not notify" "notify hook ran"
+    else
+        ok "auth: refused key does not notify"
+    fi
+    assert_log "auth: logged as error, not conflict" \
+        '*level=error*authentication refused*' '*level=conflict*'
+}
+
+test_add_failure_logged() {
+    fake_ssh_target "unused"
+    printf 'x\n' >"$_t_work/new.txt"
+    : >"$_t_work/.git/index.lock"
+    run_syncto "$_t_sb" --sync work
+    assert_status "add: failing git add exits 1" 1 "$RC" "$OUT"
+    assert_log "add: git's own error is logged" '*git add -A failed: *index.lock*'
 }
 
 # ---------------------------------------------------------------------------
@@ -847,6 +905,10 @@ test_config_roundtrip
 test_sync_basic
 test_conflict
 test_network_error_not_conflict
+test_closed_by_remote_host
+test_push_network_error
+test_auth_error_not_conflict
+test_add_failure_logged
 test_locking
 test_guard
 test_stale_alarm

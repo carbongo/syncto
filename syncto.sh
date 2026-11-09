@@ -591,6 +591,43 @@ run_hook() {
 # the sync engine
 # ---------------------------------------------------------------------------
 
+# The network is not the repository. A DNS hiccup or a dropped route makes
+# every pass fail identically for as long as it lasts, and at one pass per two
+# minutes that is a pager storm about nothing: the working tree is untouched
+# and the next good pass catches up on its own. Pull and push both log it as
+# warn and do not notify — only a real divergence is worth waking someone.
+is_transport_error() {
+    case "$1" in
+        *"Could not resolve hostname"*|\
+        *"Temporary failure in name resolution"*|\
+        *"Connection timed out"*|\
+        *"Connection reset by "*|\
+        *"Connection closed by "*|\
+        *"closed by remote host"*|\
+        *"Connection refused"*|\
+        *"Network is unreachable"*|\
+        *"No route to host"*|\
+        *"Operation timed out"*|\
+        *"kex_exchange_identification"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# The remote refused our credentials. That is an error, not a conflict: there
+# is nothing to resolve in the repo, so it exits 1 without notifying, and the
+# stale= alarm reports it if it outlasts a passing outage.
+is_auth_error() {
+    case "$1" in
+        *"Permission denied (publickey"*|\
+        *"Authentication failed"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 git_in() {
     # git_in PATH ARGS...
     _gi_path=$1
@@ -681,8 +718,9 @@ sync_locked() {
 
     # 3./4. stage and commit
     if [ "$t_mode" != "pull" ]; then
-        if ! git_in "$path" add -A >/dev/null 2>&1; then
-            log error "$name" "git add -A failed"
+        _out=""
+        if ! _out=$(git_in "$path" add -A 2>&1); then
+            log error "$name" "git add -A failed: $_out"
             return 1
         fi
         if git_in "$path" diff --cached --quiet 2>/dev/null; then
@@ -764,28 +802,15 @@ sync_locked() {
                     ;;
             esac
         fi
-        # The network is not the repository. A DNS hiccup or a dropped route
-        # makes every pass fail identically for as long as it lasts, and at one
-        # pass per two minutes that is a pager storm about nothing: the working
-        # tree is untouched and the next good pass catches up on its own. Log
-        # it, do not notify — only a real divergence is worth waking someone.
-        if [ "$_prc" -ne 0 ]; then
-            case "$_out" in
-                *"Could not resolve hostname"*|\
-                *"Temporary failure in name resolution"*|\
-                *"Connection timed out"*|\
-                *"Connection reset by "*|\
-                *"Connection closed by "*|\
-                *"Connection refused"*|\
-                *"Network is unreachable"*|\
-                *"No route to host"*|\
-                *"Operation timed out"*|\
-                *"kex_exchange_identification"*)
-                    git_in "$path" rebase --abort >/dev/null 2>&1 || :
-                    log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
-                    return 0
-                    ;;
-            esac
+        if [ "$_prc" -ne 0 ] && is_transport_error "$_out"; then
+            git_in "$path" rebase --abort >/dev/null 2>&1 || :
+            log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
+            return 0
+        fi
+        if [ "$_prc" -ne 0 ] && is_auth_error "$_out"; then
+            git_in "$path" rebase --abort >/dev/null 2>&1 || :
+            log error "$name" "pull failed, authentication refused: $(oneline "$_out")"
+            return 1
         fi
         if [ "$_prc" -ne 0 ]; then
             case "$_out" in
@@ -827,6 +852,10 @@ sync_locked() {
                         return 0
                         ;;
                 esac
+            fi
+            if is_transport_error "$_out"; then
+                log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
+                return 0
             fi
             log error "$name" "push failed ($_prc): $_out"
             return 1
