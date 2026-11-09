@@ -1,9 +1,5 @@
 #!/bin/sh
-# syncto uninstaller — removes everything install.sh put in place, except
-# user config (the config dir and its targets file are left untouched).
-#
-# Usage: ./uninstall.sh
-# or:    ./install.sh --uninstall
+# syncto uninstaller: removes what install.sh installed; keeps config and targets.
 
 set -eu
 
@@ -35,9 +31,7 @@ for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOM
   [ -f "$rc" ] || continue
   grep -Fq "$PATH_MARKER" "$rc" 2>/dev/null || continue
   tmp="$rc.syncto-uninstall.tmp"
-  # Drop the marker comment line and the PATH export line that follows it,
-  # and any single blank line immediately preceding the marker that we
-  # ourselves inserted (see install.sh's printf '\n%s\n%s\n').
+  # Drop the PATH marker, its export line and the blank line install.sh added.
   awk -v marker="$PATH_MARKER" -v pathline="$PATH_LINE" '
     { lines[NR] = $0 }
     END {

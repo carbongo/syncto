@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-#
-# syncto — unattended git sync for working copies you care about.
-#
-# Single file, no dependencies beyond POSIX tools and git.
-# Must stay bash 3.2 compatible (macOS stock) and run unchanged under bash 5:
-# no associative arrays, no case-changing parameter expansions, no bulk
-# read-a-file-into-an-array builtins, no bash-4-only declare flags.
-# Must run on macOS (BSD userland) and Linux (GNU userland): no GNU-only flags.
-#
-# Licensed under the MIT license.
+# syncto: unattended git auto-sync. MIT licence.
+# Must run on bash 3.2 (macOS stock) and bash 5, BSD and GNU userland.
 
 set -eu
 
@@ -36,8 +28,7 @@ esac
 SELF_DIR=$(dirname "$SELF")
 
 VERBOSE=0
-# 1 under -d/-w: the service units point stderr at LOG_FILE, so echoing
-# errors there too would write every such line twice.
+# 1 under -d/-w: the units already send stderr to LOG_FILE.
 DAEMON=0
 HELD_LOCK=""
 
@@ -78,11 +69,8 @@ log() {
     return 0
 }
 
-# log_rotate_maybe — keep the log from growing without bound. Checked once per
-# invocation rather than per line: a size probe on every log() call would cost a
-# stat per line for a file that only crosses the threshold once in thousands of
-# passes. One generation is kept (.1); anything older is not worth the disk.
-# `wc -c` rather than `stat`, whose flags differ between GNU and BSD.
+# log_rotate_maybe: checked once per run; keeps one old generation (.1).
+# `wc -c`, not `stat`: stat's flags differ between BSD and GNU.
 log_rotate_maybe() {
     [ -n "${LOG_FILE:-}" ] || return 0
     [ "${LOG_MAX:-0}" -gt 0 ] || return 0
@@ -276,10 +264,7 @@ G_PEER=""
 G_KEY=""
 G_SSH=""
 LOG_FILE="$STATE_DIR/syncto.log"
-# Rotate the log once it passes this many bytes (0 disables). A watch-driven
-# setup logs far less than a 2-minute timer did, but an unattended daemon that
-# never rotates still grows without bound; one rotation keeps the previous
-# generation around as .1 and nothing older.
+# Rotate the log past this many bytes (0 disables).
 LOG_MAX=${SYNCTO_LOG_MAX:-2097152}
 
 load_config() {
@@ -329,15 +314,14 @@ load_config() {
     return 0
 }
 
-# Schedulers (launchd, systemd --user) run without an ssh-agent, so give git an
-# explicit transport when the config asks for one.
+# Schedulers run without an ssh-agent, so git may need an explicit transport.
 setup_git_env() {
     GIT_TERMINAL_PROMPT=0
     export GIT_TERMINAL_PROMPT
     apply_ssh_env "$G_SSH" "$G_KEY"
 }
 
-# apply_ssh_env SSH_COMMAND KEY_PATH — scoped per target, cleared when neither is set.
+# apply_ssh_env SSH_COMMAND KEY_PATH: scoped per target, cleared when neither is set.
 # shellcheck disable=SC2089,SC2090 # git runs GIT_SSH_COMMAND through a shell
 apply_ssh_env() {
     if [ -n "$1" ]; then
@@ -536,13 +520,8 @@ trap 'lock_release; exit 1' INT TERM HUP
 NOTIFY_DIR="$STATE_DIR/notified"
 NOTIFY_COOLDOWN=${SYNCTO_NOTIFY_COOLDOWN:-1800}
 
-# notify_due NAME -> 0 if this alert should be sent, 1 if one went out for the
-# same target within the cooldown. A conflict persists until a human clears it,
-# so without this the same message goes out on every pass — and an alert that
-# arrives thirty times is one nobody reads. Keyed by target, not by the error
-# text: git varies its own wording between passes (the fetch summary line comes
-# and goes), so hashing the message would defeat the throttle entirely.
-# notify_clear on a good pass re-arms it, so a fresh problem still alerts at once.
+# notify_due NAME -> 0 if an alert may go out, 1 within the cooldown.
+# Keyed by target, not message: git's wording varies between passes.
 notify_due() {
     _nd_file="$NOTIFY_DIR/$(safe_name "$1")"
     mkdir -p "$NOTIFY_DIR" 2>/dev/null || :
@@ -564,7 +543,7 @@ notify_due() {
     return 0
 }
 
-# notify_clear NAME — the target synced cleanly, so forget the last alert.
+# notify_clear NAME: the target synced cleanly, so forget the last alert.
 notify_clear() {
     rm -f "$NOTIFY_DIR/$(safe_name "$1")" 2>/dev/null || :
     return 0
@@ -592,11 +571,7 @@ run_hook() {
 # the sync engine
 # ---------------------------------------------------------------------------
 
-# The network is not the repository. A DNS hiccup or a dropped route makes
-# every pass fail identically for as long as it lasts, and at one pass per two
-# minutes that is a pager storm about nothing: the working tree is untouched
-# and the next good pass catches up on its own. Pull and push both log it as
-# warn and do not notify — only a real divergence is worth waking someone.
+# Transport failures: warn, never notify; the next pass catches up.
 is_transport_error() {
     case "$1" in
         *"Could not resolve hostname"*|\
@@ -616,9 +591,7 @@ is_transport_error() {
     return 1
 }
 
-# The remote refused our credentials. That is an error, not a conflict: there
-# is nothing to resolve in the repo, so it exits 1 without notifying, and the
-# stale= alarm reports it if it outlasts a passing outage.
+# Auth failures: an error, not a conflict; stale= reports them if they last.
 is_auth_error() {
     case "$1" in
         *"Permission denied (publickey"*|\
@@ -646,7 +619,7 @@ sync_one() {
     resolve_opts "$opts"
     _s_rc=$t_rc
 
-    # 1. lock first — a second run must never race the first one.
+    # 1. lock first: a second run must never race the first one.
     _s_stale=$((t_interval * 10))
     if ! lock_acquire "$name" "$_s_stale"; then
         log warn "$name" "lock held by another run, skipping"
@@ -750,15 +723,8 @@ sync_locked() {
         fi
     fi
 
-    # A rebase checks the upstream out and replays on top of it, rewriting on
-    # disk every file that differs — including the one an editor has open right
-    # now. With --autostash git will even stash a half-typed paragraph, rebase,
-    # and pop it back: the text survives, but the file is rewritten twice under
-    # the editor, which reloads the buffer and drops the caret somewhere else.
-    # An editor that autosaves continuously (Obsidian) makes that the common
-    # case, not the rare one. So the rule is: never rebase into a dirty tree.
-    # If writes landed between the commit above and here, defer the pull to the
-    # next pass — the push below is still safe, it never touches the tree.
+    # Never rebase into a dirty tree: rewriting files moves an open editor's
+    # caret. Defer the pull instead; the push below never touches the tree.
     if [ "$t_mode" != "push" ] && \
        [ -n "$(git_in "$path" status --porcelain 2>/dev/null)" ]; then
         log info "$name" "tree went dirty again, deferring the pull to the next pass"
@@ -770,10 +736,8 @@ sync_locked() {
         _out=""
         _prc=0
         _out=$(git_in "$path" pull --rebase --no-autostash "$t_remote" "$t_branch" 2>&1) || _prc=$?
-        # The tree can still go dirty between the check above and the rebase's
-        # own checkout — the editor is running the whole time. Without
-        # --autostash git refuses instead of clobbering, which is precisely the
-        # outcome we want: defer quietly, never page a human over it.
+        # The tree may go dirty after the check: without --autostash git then
+        # refuses instead of clobbering, so defer quietly.
         if [ "$_prc" -ne 0 ]; then
             case "$_out" in
                 *"unstaged changes"*|*"uncommitted changes"*|\
@@ -786,11 +750,7 @@ sync_locked() {
                     ;;
             esac
         fi
-        # A concurrent `git pull` in the same repo (a human at the keyboard, an
-        # agent session) appends a second for-merge line to FETCH_HEAD, and git
-        # then refuses: "Cannot rebase onto multiple branches". Nothing is wrong
-        # with the repo — the next fetch rewrites FETCH_HEAD. Retry once before
-        # declaring a conflict, otherwise a harmless race pages a human.
+        # A concurrent `git pull` leaves two lines in FETCH_HEAD: retry once.
         if [ "$_prc" -ne 0 ]; then
             case "$_out" in
                 *"Cannot rebase onto multiple branches"*)
@@ -816,7 +776,7 @@ sync_locked() {
         if [ "$_prc" -ne 0 ]; then
             case "$_out" in
                 *"ouldn't find remote ref"*)
-                    # The branch is not on the remote yet — the push below creates it.
+                    # The branch is not on the remote yet: the push below creates it.
                     log warn "$name" "$t_remote has no branch '$t_branch' yet, pushing to create it"
                     _prc=0
                     ;;
@@ -843,9 +803,7 @@ sync_locked() {
         _prc=0
         _out=$(git_in "$path" push "$t_remote" "$t_branch" 2>&1) || _prc=$?
         if [ "$_prc" -ne 0 ]; then
-            # A deferred pull means the remote may well be ahead of us, so a
-            # rejected push here is the expected outcome rather than a failure:
-            # the next pass pulls and pushes once the writing has stopped.
+            # With the pull deferred, a rejected push is expected.
             if [ "$_pull_skipped" -eq 1 ]; then
                 case "$_out" in
                     *"non-fast-forward"*|*"fetch first"*|*"rejected"*)
@@ -870,7 +828,7 @@ sync_locked() {
     [ "$t_mode" = "push" ] && _pulled=0
     log info "$name" "sync ok (mode=$t_mode branch=$t_branch remote=$t_remote committed=$_committed pulled=$_pulled)"
 
-    # 7. poke the peer, best effort — never fails the run
+    # 7. poke the peer, best effort; never fails the run
     if [ "$_committed" -eq 1 ] && [ -n "$t_peer" ]; then
         _pout=""
         _prc2=0
@@ -883,10 +841,7 @@ sync_locked() {
     return "$_rc"
 }
 
-# mark_ok / last_ok — the last pass that actually completed a sync, as opposed to
-# mark_run's "we looked at this target". A guard that never passes again, or a
-# tree that stays dirty through every pull attempt, keeps mark_run current while
-# no bytes move; only this pair can tell the difference.
+# mark_ok / last_ok: the last pass that actually synced (mark_run: attempted).
 mark_ok() {
     mkdir -p "$OK_DIR" 2>/dev/null || :
     printf '%s\n' "$(epoch)" >"$OK_DIR/$(safe_name "$1")" 2>/dev/null || :
@@ -905,23 +860,18 @@ last_ok() {
     printf '%s' "$_lo_v"
 }
 
-# stale_check NAME — alert if this target has not synced successfully in a long
-# time. Every quiet skip in a pass (guard non-zero, dirty tree, deferred pull) is
-# individually correct and individually silent; nothing else in the tool notices
-# when one of them stops being transient and becomes permanent. This does, from
-# the outside, without having to enumerate the causes. Uses the caller's t_*.
+# stale_check NAME: alert when a target has not synced for too long,
+# whatever the cause. Uses the caller's t_*.
 stale_check() {
     _sc_name=$1
     [ "$t_stale" = "off" ] && return 0
     _sc_limit=$t_stale
-    # 0 means "derive it": long enough that ordinary deferrals never trip it,
-    # short enough that a stuck target is caught the same day.
+    # 0 means derive it from the interval.
     [ "$_sc_limit" -eq 0 ] && _sc_limit=$((t_interval * 12))
     [ "$_sc_limit" -lt 600 ] && _sc_limit=600
     _sc_last=$(last_ok "$_sc_name")
     if [ "$_sc_last" -eq 0 ]; then
-        # Never synced under this version: start the clock rather than alert on
-        # a target that may simply be new.
+        # First run: start the clock instead of alerting.
         mark_ok "$_sc_name"
         return 0
     fi
@@ -1034,9 +984,8 @@ cmd_daemon() {
         resolve_opts "$(tg_opts "$_cd_i")"
         _cd_last=$(last_run "$_cd_name")
         _cd_age=$((_cd_now - _cd_last))
-        # Grace window: a scheduler firing every N seconds drifts by a second or two,
-        # so an interval of exactly N would skip every other pass and halve the real
-        # sync rate. Treat "nearly due" as due. 10% of the interval, clamped to 5..30s.
+        # Grace window (10% of the interval, 5..30 s): schedulers drift, and an
+        # exact interval would skip every other pass.
         _cd_slack=$((t_interval / 10))
         [ "$_cd_slack" -lt 5 ] && _cd_slack=5
         [ "$_cd_slack" -gt 30 ] && _cd_slack=30
@@ -1253,9 +1202,7 @@ watch_collect() {
         eval "W_PATH_$W_COUNT=\$(tg_path \"\$_wc_i\")"
         eval "W_PEND_$W_COUNT=0"
         eval "W_FP_$W_COUNT=''"
-        # One watcher process covers every watched target, so it gets a single
-        # debounce: the most patient target's, so a slow writer is never cut off
-        # mid-burst by a neighbour that wanted a tighter window.
+        # One watcher for all targets, so it uses the longest debounce.
         if [ "$_wc_first" -eq 1 ] || [ "$t_debounce" -gt "$W_DEBOUNCE" ]; then
             W_DEBOUNCE=$t_debounce
             _wc_first=0
@@ -1272,11 +1219,8 @@ w_path() { eval "printf '%s' \"\${W_PATH_$1}\""; }
 # Mark whichever target owns this filesystem path.
 watch_mark() {
     _wm_ev=$1
-    # Ignore everything under .git. Syncing *writes* to .git (index, refs,
-    # FETCH_HEAD, logs), so counting those as changes makes every sync trigger
-    # the next one and the watcher never goes idle again. The watcher binaries
-    # are told to exclude .git too; this is the backstop for any that don't, and
-    # the reason the poll fallback was already safe (git status ignores .git).
+    # Ignore .git: syncing writes there, so counting it would loop forever.
+    # Backstop for watchers that don't exclude it themselves.
     case "$_wm_ev" in
         */.git|*/.git/*) return 0 ;;
     esac
@@ -1301,14 +1245,8 @@ watch_flush() {
             eval "W_PEND_$_wf_i=0"
             _wf_idx=$(w_idx "$_wf_i")
             _wf_name=$(tg_name "$_wf_idx")
-            # A watcher fires on any write under the repo, including paths git
-            # is told to ignore — editor scratch, trash folders, agent session
-            # files. Syncing those costs a full network round trip to discover
-            # there was nothing to commit, so ask git first: if the tree is
-            # clean, the write was ignored and there is nothing to do. Only the
-            # outbound direction is skipped; inbound still arrives via peer=
-            # wakes and the interval backstop, neither of which comes through
-            # here.
+            # A clean tree means only ignored paths changed: skip the network
+            # round trip. Inbound still arrives via peer= and the interval.
             if [ -z "$(git -C "$(w_path "$_wf_i")" status --porcelain 2>/dev/null | head -n 1)" ]; then
                 log info "$_wf_name" "watch: only ignored paths changed, nothing to sync"
                 _wf_i=$((_wf_i + 1))
@@ -1376,12 +1314,8 @@ cmd_watch() {
 }
 
 watch_loop_fswatch() {
-    # -0: NUL separated, so paths with spaces or newlines survive.
-    # -E: extended regex. Without it fswatch reads --exclude as a POSIX *basic*
-    # regex, where ( and | are literal characters — the pattern below then
-    # matches nothing and every .git write is delivered, silently and with no
-    # error. watch_mark drops them anyway, which is exactly why this needs
-    # saying: the failure is invisible except as wasted wakeups.
+    # -0: NUL separated. -E: without it --exclude is a basic regex and
+    # silently matches nothing.
     fswatch -0 -r -E --exclude '/\.git(/|$)' "$@" | {
         while IFS= read -r -d '' _wl_ev; do
             watch_mark "$_wl_ev"
@@ -1451,8 +1385,7 @@ P_COUNT=0
 P_PID=""
 
 poll_collect() {
-    # Build the poll set from targets already loaded: NAME if given, else every
-    # target with remote_poll > 0. push-only targets never pull, so never poll.
+    # Poll set: NAME, or every target with remote_poll > 0 that pulls.
     _pc_only=${1:-}
     P_COUNT=0
     P_TICK=0
@@ -1474,11 +1407,8 @@ poll_collect() {
     return 0
 }
 
-# remote_moved INDEX -> 0 if the remote branch head is a commit this clone does
-# not have. One ls-remote is a single ref advertisement, no objects, so polling
-# it often costs far less than a full sync pass. A head that is already in local
-# history (pushed from here, or local is ahead) is not news. An unreachable
-# remote reads as "not moved": the next tick or the interval catches up.
+# remote_moved INDEX -> 0 if the remote head is a commit this clone lacks.
+# One cheap ls-remote; an unreachable remote reads as not moved.
 remote_moved() {
     _rm_path=$(tg_path "$1")
     resolve_opts "$(tg_opts "$1")" || :
@@ -1531,8 +1461,7 @@ xml_escape() {
 
 SHELL_BIN="/bin/bash"
 
-# The command the scheduler should run. Prefer the installed entry point, which is
-# what the shipped unit templates document; fall back to this very file.
+# The scheduler's command: the installed entry point, else this file.
 sched_exec() {
     if [ -x "$HOME/.local/bin/syncto" ]; then
         printf '%s' "$HOME/.local/bin/syncto"
@@ -1541,10 +1470,8 @@ sched_exec() {
     fi
 }
 
-# render_template FILE -> prints the template with its @NAME@ placeholders filled in,
-# or fails (1) if the file is missing, unreadable, or still has a placeholder left.
-# Templates only ship in the source tree; an installed copy falls back to the
-# inline units below, which are kept identical to them.
+# render_template FILE: fills @NAME@ placeholders; fails if any remain.
+# Installed copies use the inline units below, kept identical.
 render_template() {
     [ -f "$1" ] || return 1
     _rt_exec=$(sched_exec)
@@ -1561,16 +1488,9 @@ render_template() {
     return 0
 }
 
-# Print the ProgramArguments / ExecStart words, one per line: an executable entry
-# point runs directly, anything else goes through bash.
-#
-# macOS is the exception: always go through $SHELL_BIN explicitly. macOS TCC grants
-# file access (Full Disk Access, and the per-folder Documents/Desktop grants) to the
-# *binary the scheduler exec'd*. Exec the script directly and the responsible process
-# is the script itself, which holds no grant — so a launchd job silently reads a
-# protected folder, such as an iCloud Drive path, as empty or missing. Naming
-# /bin/bash keeps the grant on a stable, always-present binary the user can add once
-# in System Settings > Privacy & Security > Full Disk Access.
+# Print the ProgramArguments / ExecStart words, one per line.
+# macOS always goes through $SHELL_BIN: TCC grants (Full Disk Access) attach
+# to the binary launchd exec'd, and a script holds none.
 sched_argv() {
     _sa_exec=$(sched_exec)
     if [ ! -x "$_sa_exec" ] || [ "$(uname -s)" = "Darwin" ]; then
@@ -1700,11 +1620,8 @@ systemd_dir() {
     printf '%s/systemd/user' "${XDG_CONFIG_HOME:-$HOME/.config}"
 }
 
-# any_watch_target -> 0 if at least one configured target has watch=on or
-# remote_poll (the watch daemon also runs the remote poll). The
-# watch daemon is only worth installing when something asked to be watched;
-# without this a plain interval setup would gain a resident process that wakes
-# for nothing.
+# any_watch_target -> 0 if a target has watch=on or remote_poll (both need
+# the watch daemon).
 any_watch_target() {
     targets_load
     _aw_i=0

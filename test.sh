@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-#
-# test.sh — test suite for syncto.
-#
-# Every test runs inside its own mktemp -d sandbox with HOME and
-# XDG_CONFIG_HOME overridden, so the real user's config/repos/home are never
-# touched. Run under bash; targets bash 3.2 semantics in syncto.sh itself.
-#
-# Usage: ./test.sh [-v]
+# test.sh: syncto's test suite. Each test runs in its own mktemp -d sandbox
+# with HOME and the XDG dirs inside it. Usage: ./test.sh [-v]
 
 set -u
 
@@ -63,18 +57,15 @@ assert_status() {
 # sandbox helpers
 # ---------------------------------------------------------------------------
 
-# new_sandbox -> prints the sandbox root, sets HOME/XDG_CONFIG_HOME inside it,
-# and registers it for cleanup. Every test that touches config/git must call
-# this first and export HOME/XDG_CONFIG_HOME from its result.
+# new_sandbox -> prints a fresh sandbox root, registered for cleanup.
 new_sandbox() {
     _ns_dir=$(mktemp -d "${TMPDIR:-/tmp}/syncto-test.XXXXXX")
     SANDBOXES="$SANDBOXES $_ns_dir"
     printf '%s' "$_ns_dir"
 }
 
-# run_syncto SANDBOX ARGS... — runs syncto.sh with HOME/XDG_CONFIG_HOME/
-# XDG_STATE_HOME pointed inside SANDBOX/home, output captured to global
-# OUT, exit code to global RC. Never touches the real user's env.
+# run_syncto SANDBOX ARGS...: runs syncto.sh with HOME and the XDG dirs inside
+# SANDBOX/home; sets OUT and RC.
 run_syncto() {
     _rg_sandbox=$1
     shift
@@ -86,7 +77,7 @@ run_syncto() {
 }
 
 git_q() {
-    # git_q PATH ARGS... — quiet git with a fixed identity, no gpg signing.
+    # git_q PATH ARGS...: quiet git with a fixed identity, no gpg signing.
     _gq_path=$1
     shift
     git -C "$_gq_path" -c user.email=test@example.com -c user.name="Test" \
@@ -256,11 +247,8 @@ test_conflict() {
     _t_work="$_t_sb/home/work"
 
     git init --bare "$_t_bare" >/dev/null 2>&1
-    # HEAD in a fresh bare repo follows init.defaultBranch, which is `master` on
-    # a stock git. Every clone below expects `main`; without this the second
-    # clone checks out nothing, commits to `master`, and its `push origin main`
-    # fails silently — so no divergence is ever created and the conflict this
-    # test exists to provoke never happens.
+    # A bare repo's HEAD follows init.defaultBranch: pin it to main, or the
+    # clones below never diverge.
     git -C "$_t_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
     git clone "$_t_bare" "$_t_work" >/dev/null 2>&1
     git_q "$_t_work" config user.email test@example.com
@@ -601,11 +589,8 @@ test_spaces() {
     _t_work="$_t_sb/home/my repo dir"
 
     git init --bare "$_t_bare" >/dev/null 2>&1
-    # HEAD in a fresh bare repo follows init.defaultBranch, which is `master` on
-    # a stock git. Every clone below expects `main`; without this the second
-    # clone checks out nothing, commits to `master`, and its `push origin main`
-    # fails silently — so no divergence is ever created and the conflict this
-    # test exists to provoke never happens.
+    # A bare repo's HEAD follows init.defaultBranch: pin it to main, or the
+    # clones below never diverge.
     git -C "$_t_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
     git clone "$_t_bare" "$_t_work" >/dev/null 2>&1
     git_q "$_t_work" config user.email test@example.com
@@ -631,7 +616,7 @@ test_spaces() {
 # 8. watch: .git writes must never trigger a sync
 # ---------------------------------------------------------------------------
 
-# run_syncto_path SANDBOX STUBDIR ARGS... — as run_syncto, but with STUBDIR
+# run_syncto_path SANDBOX STUBDIR ARGS...: as run_syncto, but with STUBDIR
 # prepended to PATH so a stub watcher binary is found instead of a real one.
 run_syncto_path() {
     _rp_sandbox=$1
@@ -645,9 +630,8 @@ run_syncto_path() {
     RC=$?
 }
 
-# Build a sandbox with a working target and a stub `inotifywait` that replays
-# the paths given to it, one per line, then exits (closing the pipe ends the
-# watch loop, so the test is bounded).
+# Sandbox with a working target and a stub watcher that replays the given
+# paths, one per line, then exits (which ends the watch loop).
 watch_fixture() {
     _wf_sb=$1
     shift
@@ -658,7 +642,7 @@ watch_fixture() {
     git -C "$_wf_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || :
     git clone "$_wf_bare" "$_wf_work" >/dev/null 2>&1
     # syncto commits with plain `git`, not the test's `git_q`, so the identity
-    # has to live in the repo config — the sandbox HOME has no global one.
+    # has to live in the repo config: the sandbox HOME has no global one.
     git_q "$_wf_work" config user.email test@example.com
     git_q "$_wf_work" config user.name Test
     git_q "$_wf_work" checkout -B main
@@ -672,11 +656,8 @@ watch_fixture() {
         printf 'exit 0\n'
     } >"$_wf_sb/stub/inotifywait"
     chmod +x "$_wf_sb/stub/inotifywait"
-    # cmd_watch prefers fswatch and only falls back to inotifywait, so on any
-    # machine that actually has fswatch installed (every dev Mac) stubbing
-    # inotifywait alone leaves the real watcher running — it never exits, the
-    # pipe never closes, and the watch tests hang forever instead of failing.
-    # Stub both. fswatch is invoked with -0, so events are NUL-separated.
+    # Stub fswatch too: cmd_watch prefers it, and a real one never exits.
+    # fswatch runs with -0, so events are NUL separated.
     {
         printf '#!/bin/sh\n'
         for _wf_ev in "$@"; do
@@ -736,7 +717,7 @@ test_watch_skips_ignored() {
     _t_sb=$(new_sandbox)
     _t_work="$_t_sb/home/work"
     # The watcher announces the repo root, but the only thing that changed is a
-    # gitignored file — no sync, and above all no network round trip.
+    # gitignored file: no sync, and no network round trip.
     watch_fixture "$_t_sb" "$_t_sb/home/work"
 
     printf 'scratch/\n' >"$_t_work/.gitignore"
@@ -785,9 +766,8 @@ test_debounce_option() {
 }
 
 test_dirty_tree_defers_pull() {
-    # A rebase rewrites files on disk, so it must never run while an editor has
-    # unsaved-and-resaved work in the tree. mode=pull makes this deterministic:
-    # nothing is committed, so a dirty tree is dirty when the pull is reached.
+    # A dirty tree defers the pull. mode=pull commits nothing, so the tree
+    # is still dirty when the pull is reached.
     _t_sb=$(new_sandbox)
     mkdir -p "$_t_sb/home"
     _t_bare="$_t_sb/remote.git"
