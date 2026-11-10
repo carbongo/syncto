@@ -88,7 +88,9 @@ log_rotate_maybe() {
         ''|*[!0-9]*) return 0 ;;
     esac
     [ "$_lr_size" -gt "$LOG_MAX" ] || return 0
-    mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
+    # Copy, then truncate: a daemon's stderr stays open on this same file.
+    cp -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
+    : >"$LOG_FILE"
     return 0
 }
 
@@ -1459,7 +1461,13 @@ opts_join() {
 
 # targets_rewrite NAME LINE: replace NAME's line with LINE, or drop it if LINE is empty.
 targets_rewrite() {
-    _tr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
+    # A temp file next to the targets file, renamed over it, so a reader never
+    # sees it half written. A symlinked targets file is rewritten in place.
+    if [ -L "$TARGETS_FILE" ]; then
+        _tr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
+    else
+        _tr_tmp=$(mktemp "$TARGETS_FILE.XXXXXX") || die 1 "cannot create a temp file"
+    fi
     while IFS= read -r _tr_line || [ -n "$_tr_line" ]; do
         _tr_first=${_tr_line%%"$TAB"*}
         if [ "$_tr_first" = "$1" ] && [ "$_tr_first" != "$_tr_line" ]; then
@@ -1468,8 +1476,13 @@ targets_rewrite() {
         fi
         printf '%s\n' "$_tr_line" >>"$_tr_tmp"
     done <"$TARGETS_FILE"
-    cat "$_tr_tmp" >"$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
-    rm -f "$_tr_tmp"
+    if [ -L "$TARGETS_FILE" ]; then
+        cat "$_tr_tmp" >"$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
+        rm -f "$_tr_tmp"
+    else
+        chmod 600 "$_tr_tmp" 2>/dev/null || :
+        mv -f "$_tr_tmp" "$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
+    fi
 }
 
 cmd_add() {
@@ -1933,8 +1946,14 @@ sched_runner() {
         else
             printf '%s' "$SHELL_BIN"
         fi
-    elif [ ! -x "$(sched_exec)" ]; then
-        printf '%s' "$SHELL_BIN"
+    else
+        # systemd refuses special characters in the program path; as an argument
+        # the escaped path is fine.
+        _sr_exec=$(sched_exec)
+        case "$_sr_exec" in
+            *[!A-Za-z0-9/._+-]*) printf '%s' "$SHELL_BIN" ;;
+            *) [ -x "$_sr_exec" ] || printf '%s' "$SHELL_BIN" ;;
+        esac
     fi
 }
 
@@ -1943,6 +1962,29 @@ sched_argv() {
     _sa_runner=$(sched_runner)
     [ -n "$_sa_runner" ] && printf '%s\n' "$_sa_runner"
     printf '%s\nrun\n' "$(sched_exec)"
+}
+
+# sd_words: lines on stdin -> one ExecStart value, each word quoted for systemd
+# (backslash, quote, % specifiers and $ variables escaped).
+sd_words() {
+    _sw_q='"'
+    _sw_out=""
+    while IFS= read -r _sw; do
+        [ -n "$_sw" ] || continue
+        _sw=${_sw//\\/\\\\}
+        _sw=${_sw//$_sw_q/\\$_sw_q}
+        _sw=${_sw//%/%%}
+        _sw=${_sw//\$/\$\$}
+        _sw_out="$_sw_out $_sw_q$_sw$_sw_q"
+    done
+    printf '%s' "${_sw_out# }"
+}
+
+# sched_runner_line: sched_runner on a line of its own, or nothing
+sched_runner_line() {
+    _srl=$(sched_runner)
+    [ -n "$_srl" ] && printf '%s\n' "$_srl"
+    return 0
 }
 
 plist_path() {
@@ -2082,12 +2124,7 @@ install_systemd() {
     mkdir -p "$_is_dir" || die 1 "cannot create $_is_dir"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
 
-    _is_argv=""
-    while IFS= read -r _is_a; do
-        _is_argv="$_is_argv \"$_is_a\""
-    done <<EOF
-$(sched_argv)
-EOF
+    _is_argv=$(sched_argv | sd_words)
     cat >"$_is_dir/syncto.service" <<EOF || die 1 "cannot write $_is_dir/syncto.service"
 [Unit]
 Description=syncto scheduled sync pass
@@ -2096,7 +2133,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${_is_argv# }
+ExecStart=$_is_argv
 EOF
 
     cat >"$_is_dir/syncto.timer" <<EOF || die 1 "cannot write $_is_dir/syncto.timer"
@@ -2124,7 +2161,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$(sched_exec) watch
+ExecStart=$( { sched_runner_line; sched_exec; printf "\nwatch\n"; } | sd_words)
 Restart=always
 RestartSec=5
 
@@ -2885,7 +2922,7 @@ dash_details() {
                 esac
                 dash_add_line "   $C_DIM${_dt_ts:5:5} ${_dt_ts:11:5}$C_OFF  $(fit "$_dt_msg" $((D_COLS - 16)))"
             done <<EOF
-$(grep -F " target=$_dt_name msg=" "$LOG_FILE" 2>/dev/null | tail -n "$_dt_room")
+$(awk -v t="target=$_dt_name" '$3 == t' "$LOG_FILE" 2>/dev/null | tail -n "$_dt_room")
 EOF
         fi
         dash_finish "e edit  s sync now  p pause  x remove  ← back"

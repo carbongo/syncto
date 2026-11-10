@@ -1331,6 +1331,50 @@ test_key_path_quoting() {
     fi
 }
 
+test_files_kept_in_place() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work" "$_t_sb/home/dotfiles"
+    git_q "$_t_work" init
+
+    # A symlinked targets file stays a symlink when syncto edits it.
+    mkdir -p "$_t_sb/home/.config/syncto"
+    printf 'work\t%s\tinterval=60\n' "$_t_work" >"$_t_sb/home/dotfiles/targets"
+    ln -s "$_t_sb/home/dotfiles/targets" "$_t_sb/home/.config/syncto/targets"
+    run_syncto "$_t_sb" edit work interval=90
+    if [ -L "$_t_sb/home/.config/syncto/targets" ] && grep -q interval=90 "$_t_sb/home/dotfiles/targets"; then
+        ok "files: edit keeps a symlinked targets file a symlink"
+    else
+        fail "files: edit keeps a symlinked targets file a symlink" "$(ls -l "$_t_sb/home/.config/syncto/")"
+    fi
+
+    # Rotation copies and truncates, so the log stays the same file.
+    printf 'log_max=200\n' >"$_t_sb/home/.config/syncto/config"
+    _t_log="$_t_sb/home/.local/state/syncto/syncto.log"
+    mkdir -p "${_t_log%/*}"
+    printf '%0300d\n' 0 >"$_t_log"
+    _t_inode=$(ls -i "$_t_log" | awk '{print $1}')
+    run_syncto "$_t_sb" status
+    if [ -s "$_t_log.1" ] && [ "$(ls -i "$_t_log" | awk '{print $1}')" = "$_t_inode" ] &&
+       [ "$(wc -c <"$_t_log" | tr -d ' ')" -lt 200 ]; then
+        ok "files: log rotation keeps writing to the same file"
+    else
+        fail "files: log rotation keeps writing to the same file" "$(ls -li "${_t_log%/*}")"
+    fi
+
+    # uninstall keeps a symlinked rc file a symlink, and its mode.
+    printf 'keep\n\n# added by syncto installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >"$_t_sb/home/dotfiles/zshrc"
+    chmod 600 "$_t_sb/home/dotfiles/zshrc"
+    ln -s "$_t_sb/home/dotfiles/zshrc" "$_t_sb/home/.zshrc"
+    HOME="$_t_sb/home" ZDOTDIR="$_t_sb/home" sh "$HERE/uninstall.sh" >/dev/null 2>&1
+    if [ -L "$_t_sb/home/.zshrc" ] && ! grep -q 'syncto installer' "$_t_sb/home/dotfiles/zshrc" &&
+       [ "$(ls -l "$_t_sb/home/dotfiles/zshrc" | cut -c1-10)" = "-rw-------" ]; then
+        ok "files: uninstall keeps a symlinked rc file and its mode"
+    else
+        fail "files: uninstall keeps a symlinked rc file and its mode" "$(ls -l "$_t_sb/home/.zshrc" "$_t_sb/home/dotfiles/zshrc"; cat "$_t_sb/home/dotfiles/zshrc")"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
@@ -1345,6 +1389,7 @@ test_control_characters
 test_subfolder_target
 test_private_files
 test_key_path_quoting
+test_files_kept_in_place
 test_sync_basic
 test_conflict
 test_network_error_not_conflict
