@@ -18,8 +18,10 @@ Needs git and bash 3.2 or newer (the bash macOS ships works). `fswatch` or
 ```sh
 syncto add notes ~/notes watch=on   # sync ~/notes on every save
 syncto start                        # keep syncing in the background
-syncto status                       # how every sync is doing
+syncto                              # dashboard: see, add, edit, pause and sync repos
 ```
+
+`syncto status` prints the same health as text:
 
 ```
 notes     ✓ synced 2 min ago      on save         ~/notes

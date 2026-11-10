@@ -1036,12 +1036,68 @@ test_paused() {
 }
 
 # ---------------------------------------------------------------------------
+# dashboard (plain syncto in a terminal)
+# ---------------------------------------------------------------------------
+
+# run_in_pty SANDBOX KEYS: plain syncto in a pseudo-terminal fed KEYS; sets RAW,
+# OUT (escapes stripped) and RC. Uses BSD or util-linux script, whichever exists.
+run_in_pty() {
+    if script --version >/dev/null 2>&1; then
+        RAW=$(printf '%s' "$2" | HOME="$1/home" XDG_CONFIG_HOME="$1/home/.config" \
+            XDG_STATE_HOME="$1/home/.local/state" TERM=xterm \
+            script -qec "'$SYNCTO'" /dev/null 2>&1)
+    else
+        RAW=$(printf '%s' "$2" | HOME="$1/home" XDG_CONFIG_HOME="$1/home/.config" \
+            XDG_STATE_HOME="$1/home/.local/state" TERM=xterm \
+            script -q /dev/null "$SYNCTO" 2>&1)
+    fi
+    RC=$?
+    OUT=$(printf '%s' "$RAW" | LC_ALL=C sed $'s/\033\\[[0-9;?]*[A-Za-z]//g')
+}
+
+test_dashboard() {
+    if ! command -v script >/dev/null 2>&1; then
+        ok "dashboard: skipped, no script(1) here"
+        return 0
+    fi
+    _t_sb=$(new_sandbox)
+    _t_target="$_t_sb/home/notes"
+    mkdir -p "$_t_target"
+    git_q "$_t_target" init
+    run_syncto "$_t_sb" add notes "$_t_target" watch=on
+
+    run_in_pty "$_t_sb" q
+    assert_status "dashboard: q quits with 0" 0 "$RC" "$OUT"
+    case "$OUT" in
+        *notes*"not synced yet"*"q quit"*) ok "dashboard: lists repos with health and keys" ;;
+        *) fail "dashboard: lists repos with health and keys" "$OUT" ;;
+    esac
+    case "$RAW" in
+        *$'\033[?1049l'*) ok "dashboard: restores the terminal on quit" ;;
+        *) fail "dashboard: restores the terminal on quit" "$RAW" ;;
+    esac
+
+    run_in_pty "$_t_sb" "?xq"
+    case "$OUT" in
+        *"How syncto works"*) ok "dashboard: ? shows how syncto works" ;;
+        *) fail "dashboard: ? shows how syncto works" "$OUT" ;;
+    esac
+
+    run_in_pty "$_t_sb" pq
+    case "$(cat "$_t_sb/home/.config/syncto/targets")" in
+        *paused=on*) ok "dashboard: p pauses the selected repo" ;;
+        *) fail "dashboard: p pauses the selected repo" "$(cat "$_t_sb/home/.config/syncto/targets")" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
 test_config_roundtrip
 test_edit_options
 test_paused
+test_dashboard
 test_sync_basic
 test_conflict
 test_network_error_not_conflict

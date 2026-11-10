@@ -4,7 +4,8 @@
 
 | Command | Does |
 |---|---|
-| `status` (or plain `syncto`) | each repo's health, how it syncs, a fix when it needs you; whether background syncing is on |
+| (none) | in a terminal, the dashboard: ↑↓ move, ⏎ details, `a` add, `e` edit, `s` sync, `p` pause, `x` remove, `b` background, `?` help; otherwise `status` |
+| `status` | each repo's health, how it syncs, a fix when it needs you; whether background syncing is on |
 | `add NAME PATH [K=V ...]` | start syncing a repo; [options](options.md) comma separated or one per argument |
 | `edit NAME K=V ...` | change a repo's options; `K=` resets one to its default |
 | `edit` | open the targets file in `$EDITOR` |

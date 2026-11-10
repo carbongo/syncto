@@ -1240,11 +1240,7 @@ cmd_status() {
         return 0
     fi
 
-    C_OK="" C_WAIT="" C_WARN="" C_BAD="" C_DIM="" C_OFF=""
-    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
-        C_OK=$(printf '\033[32m') C_WAIT=$(printf '\033[2m') C_WARN=$(printf '\033[33m')
-        C_BAD=$(printf '\033[31m') C_DIM=$(printf '\033[2m') C_OFF=$(printf '\033[0m')
-    fi
+    colors_init
     _st_cols=${COLUMNS:-$(tput cols 2>/dev/null || printf '100')}
     case "$_st_cols" in ''|*[!0-9]*) _st_cols=100 ;; esac
 
@@ -1262,14 +1258,9 @@ cmd_status() {
     _st_i=0
     while [ "$_st_i" -lt "$TG_COUNT" ]; do
         target_health "$_st_i"
-        case "$H_LEVEL" in
-            ok) _st_sym="✓" _st_c=$C_OK ;;
-            wait) _st_sym="·" _st_c=$C_WAIT ;;
-            warn) _st_sym="!" _st_c=$C_WARN ;;
-            *) _st_sym="✗" _st_c=$C_BAD ;;
-        esac
+        level_style "$H_LEVEL"
         printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$(tg_name "$_st_i")" \
-            "$_st_c" "$_st_sym" "$H_TEXT" "$C_OFF" "$H_HOW" "$(path_encode "$(tg_path "$_st_i")")"
+            "$L_C" "$L_SYM" "$H_TEXT" "$C_OFF" "$H_HOW" "$(path_encode "$(tg_path "$_st_i")")"
         _st_line=$H_DETAIL
         # Long git output is cut to the terminal width; the fix line never is.
         if [ -t 1 ] && [ "${#_st_line}" -gt "$_st_room" ]; then
@@ -1280,13 +1271,7 @@ cmd_status() {
         _st_i=$((_st_i + 1))
     done
 
-    printf '\n'
-    case "$(background_state)" in
-        on+watch) printf 'Background: on, %s, and on every save.\n' "$(human_every "$G_INTERVAL")" ;;
-        on) printf 'Background: on, %s.\n' "$(human_every "$G_INTERVAL")" ;;
-        stopped) printf "Background: installed but not running. Restart it with: syncto start\n" ;;
-        *) printf "Background: off. Turn it on with: syncto start\n" ;;
-    esac
+    printf '\n%s\n' "$(background_words "$(background_state)")"
     if [ "$TG_MALFORMED" -eq 1 ]; then
         return 3
     fi
@@ -1299,7 +1284,7 @@ ensure_targets_file() {
         {
             printf '# syncto targets\n'
             printf '# NAME<TAB>PATH<TAB>OPTIONS   ($HOME is written as ~ so this file travels)\n'
-            printf '# options: interval= watch= mode= branch= remote= prefix= guard= stale= notify= peer= remote_poll=\n'
+            printf '# OPTIONS: comma separated key=value, see: syncto help\n'
         } >"$TARGETS_FILE" || die 3 "cannot write $TARGETS_FILE"
     fi
     return 0
@@ -2013,6 +1998,716 @@ cmd_stop() {
 }
 
 # ---------------------------------------------------------------------------
+# dashboard
+# ---------------------------------------------------------------------------
+
+# colors_init: C_* escapes when stdout is a colour terminal, else empty.
+colors_init() {
+    C_OK="" C_WAIT="" C_WARN="" C_BAD="" C_DIM="" C_OFF="" C_BOLD="" C_REV=""
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+        C_OK=$(printf '\033[32m') C_WAIT=$(printf '\033[2m') C_WARN=$(printf '\033[33m')
+        C_BAD=$(printf '\033[31m') C_DIM=$(printf '\033[2m') C_OFF=$(printf '\033[0m')
+        C_BOLD=$(printf '\033[1m') C_REV=$(printf '\033[7m')
+    fi
+}
+
+# level_style LEVEL: sets L_SYM and L_C for a health level.
+level_style() {
+    case "$1" in
+        ok) L_SYM="✓" L_C=$C_OK ;;
+        wait) L_SYM="·" L_C=$C_WAIT ;;
+        warn) L_SYM="!" L_C=$C_WARN ;;
+        *) L_SYM="✗" L_C=$C_BAD ;;
+    esac
+}
+
+# background_words STATE -> the sentence status and the dashboard show
+background_words() {
+    case "$1" in
+        on+watch) printf 'Background: on, %s, and on every save.' "$(human_every "$G_INTERVAL")" ;;
+        on) printf 'Background: on, %s.' "$(human_every "$G_INTERVAL")" ;;
+        stopped) printf 'Background: installed but not running. Restart it with: syncto start' ;;
+        *) printf 'Background: off. Turn it on with: syncto start' ;;
+    esac
+}
+
+# fit TEXT WIDTH -> TEXT cut to WIDTH characters, ending in … when cut
+fit() {
+    if [ "$2" -lt 1 ]; then
+        return 0
+    elif [ "$2" -lt 2 ]; then
+        printf '%s' "${1:0:$2}"
+    elif [ "${#1}" -gt "$2" ]; then
+        printf '%s…' "${1:0:$(($2 - 1))}"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# parse_duration TEXT -> seconds from "90", "90s", "10m", "10 min", "2h"; 1 if not one
+parse_duration() {
+    _pd=$(printf '%s' "$1" | tr -d ' ' | tr 'A-Z' 'a-z')
+    case "$_pd" in
+        ''|*[!0-9smhin]*) return 1 ;;
+    esac
+    _pd_n=${_pd%%[!0-9]*}
+    [ -n "$_pd_n" ] || return 1
+    case "${_pd#"$_pd_n"}" in
+        ''|s) printf '%s' "$_pd_n" ;;
+        m|min) printf '%s' $((_pd_n * 60)) ;;
+        h) printf '%s' $((_pd_n * 3600)) ;;
+        *) return 1 ;;
+    esac
+}
+
+# opt_is_set OPTS KEY -> 0 if KEY is given explicitly in a target's options
+opt_is_set() {
+    split_opts "$1" | grep -q "^$2="
+}
+
+dash_can_run() {
+    [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]
+}
+
+dash_enter() {
+    D_STTY=$(stty -g 2>/dev/null || printf '')
+    stty -echo -icanon 2>/dev/null || :
+    printf '\033[?1049h\033[?25l'
+    trap 'dash_leave; exit 130' INT TERM
+    trap 'dash_leave' EXIT
+    # A resize interrupts the key wait, and every frame re-reads the size.
+    trap ':' WINCH
+}
+
+dash_leave() {
+    trap - EXIT INT TERM WINCH
+    printf '\033[?25h\033[?1049l'
+    if [ -n "${D_STTY:-}" ]; then
+        stty "$D_STTY" 2>/dev/null || :
+    fi
+}
+
+dash_size() {
+    # stty reads the terminal on stdin; tput inside $(...) can miss it.
+    _ds_size=$(stty size 2>/dev/null || printf '24 80')
+    D_LINES=${_ds_size% *}
+    D_COLS=${_ds_size#* }
+    case "$D_COLS" in ''|*[!0-9]*) D_COLS=80 ;; esac
+    case "$D_LINES" in ''|*[!0-9]*) D_LINES=24 ;; esac
+    # A pty created without a size reports 0 0.
+    [ "$D_COLS" -lt 20 ] && D_COLS=80
+    [ "$D_LINES" -lt 8 ] && D_LINES=24
+    D_SEP=$(printf '─%.0s' $(seq 1 "$D_COLS"))
+}
+
+# dash_key: waits up to D_TICK seconds and sets D_KEY to up, down, left, right,
+# enter, esc, tick (nothing pressed) or the character typed.
+dash_key() {
+    D_KEY=tick
+    _dk=""
+    IFS= read -rsn1 -t "$D_TICK" _dk || return 0
+    case "$_dk" in
+        "") D_KEY=enter ;;
+        $'\033')
+            _dk2=""
+            IFS= read -rsn2 -t 1 _dk2 || :
+            case "$_dk2" in
+                "[A"|OA) D_KEY=up ;;
+                "[B"|OB) D_KEY=down ;;
+                "[C"|OC) D_KEY=right ;;
+                "[D"|OD) D_KEY=left ;;
+                *) D_KEY=esc ;;
+            esac
+            ;;
+        $'\177'|$'\010') D_KEY=left ;;
+        *) D_KEY=$_dk ;;
+    esac
+}
+
+# dash_paint: draws D_FRAME (newline separated) over the screen without flicker
+dash_paint() {
+    _dp_out=$(printf '\033[H')
+    _dp_n=0
+    while IFS= read -r _dp_l; do
+        _dp_n=$((_dp_n + 1))
+        [ "$_dp_n" -gt "$D_LINES" ] && break
+        if [ "$_dp_n" -lt "$D_LINES" ]; then
+            _dp_out="$_dp_out$_dp_l"$'\033[K\n'
+        else
+            _dp_out="$_dp_out$_dp_l"$'\033[K'
+        fi
+    done <<EOF
+$D_FRAME
+EOF
+    printf '%s\033[J' "$_dp_out"
+}
+
+dash_add_line() {
+    D_FRAME="$D_FRAME$1"$'\n'
+    D_FL=$((D_FL + 1))
+}
+
+# dash_finish FOOTER: pads the frame, adds the message and footer lines, paints.
+dash_finish() {
+    while [ "$D_FL" -lt $((D_LINES - 2)) ]; do
+        dash_add_line ""
+    done
+    dash_add_line " ${D_MSG:+$C_BOLD$(fit "$D_MSG" $((D_COLS - 2)))$C_OFF}"
+    D_FRAME="$D_FRAME $C_DIM$(fit "$1" $((D_COLS - 2)))$C_OFF"
+    dash_paint
+}
+
+dash_header() {
+    D_FRAME=""
+    D_FL=0
+    _dh_right=$2
+    _dh_vis=$(printf '%s' "$_dh_right" | sed $'s/\033\\[[0-9;]*m//g')
+    _dh_room=$((D_COLS - ${#_dh_vis} - 3))
+    [ "$_dh_room" -lt 1 ] && _dh_room=1
+    dash_add_line " $C_BOLD$(printf "%-${_dh_room}s" "$(fit "$1" "$_dh_room")")$C_OFF $_dh_right"
+    dash_add_line "$C_DIM$D_SEP$C_OFF"
+}
+
+# dash_refresh: health of every target into D_* variables
+dash_refresh() {
+    targets_load
+    D_N=$TG_COUNT
+    [ "$D_SEL" -ge "$D_N" ] && D_SEL=$((D_N - 1))
+    [ "$D_SEL" -lt 0 ] && D_SEL=0
+    _dr_i=0
+    while [ "$_dr_i" -lt "$D_N" ]; do
+        target_health "$_dr_i"
+        eval "D_LV_$_dr_i=\$H_LEVEL D_TX_$_dr_i=\$H_TEXT D_DT_$_dr_i=\$H_DETAIL D_FX_$_dr_i=\$H_FIX D_HW_$_dr_i=\$H_HOW"
+        _dr_i=$((_dr_i + 1))
+    done
+    D_BG=$(background_state)
+}
+
+# dash_rows INDEX -> screen lines target INDEX takes in the list
+dash_rows() {
+    eval "_dr_lv=\$D_LV_$1 _dr_dt=\$D_DT_$1 _dr_fx=\$D_FX_$1"
+    _dr_r=1
+    # shellcheck disable=SC2154 # set by eval
+    if [ "$_dr_lv" = "bad" ] || [ "$_dr_lv" = "warn" ]; then
+        [ -n "$_dr_dt" ] && _dr_r=$((_dr_r + 1))
+        [ -n "$_dr_fx" ] && _dr_r=$((_dr_r + 1))
+    fi
+    printf '%s' "$_dr_r"
+}
+
+dash_draw_list() {
+    dash_size
+    if [ "$D_N" -eq 1 ]; then _dl_count="1 repo"; else _dl_count="$D_N repos"; fi
+    dash_header "syncto" "$_dl_count"
+    if [ "$D_N" -eq 0 ]; then
+        dash_add_line ""
+        dash_add_line "   No repos yet. Press a to add one, or ? to see how syncto works."
+        dash_add_line ""
+        dash_add_line "   $(background_words "$D_BG")"
+        dash_finish "a add  b background  ? help  q quit"
+        return 0
+    fi
+
+    _dl_w=4
+    _dl_i=0
+    while [ "$_dl_i" -lt "$D_N" ]; do
+        _dl_n=$(tg_name "$_dl_i")
+        [ "${#_dl_n}" -gt "$_dl_w" ] && _dl_w=${#_dl_n}
+        _dl_i=$((_dl_i + 1))
+    done
+    _dl_pad=$(printf "%$((_dl_w + 5))s" "")
+    _dl_room=$((D_COLS - _dl_w - 6))
+
+    # Scroll so the selected row is on screen.
+    _dl_avail=$((D_LINES - 6))
+    [ "$D_SEL" -lt "$D_TOP" ] && D_TOP=$D_SEL
+    while :; do
+        _dl_used=0
+        _dl_i=$D_TOP
+        while [ "$_dl_i" -le "$D_SEL" ]; do
+            _dl_used=$((_dl_used + $(dash_rows "$_dl_i")))
+            _dl_i=$((_dl_i + 1))
+        done
+        if [ "$_dl_used" -le "$_dl_avail" ] || [ "$D_TOP" -ge "$D_SEL" ]; then
+            break
+        fi
+        D_TOP=$((D_TOP + 1))
+    done
+
+    _dl_i=$D_TOP
+    while [ "$_dl_i" -lt "$D_N" ] && [ "$D_FL" -lt $((D_LINES - 4)) ]; do
+        eval "_dl_lv=\$D_LV_$_dl_i _dl_tx=\$D_TX_$_dl_i _dl_dt=\$D_DT_$_dl_i _dl_fx=\$D_FX_$_dl_i _dl_hw=\$D_HW_$_dl_i"
+        # shellcheck disable=SC2154 # set by eval
+        level_style "$_dl_lv"
+        _dl_name=$(printf "%-${_dl_w}s" "$(tg_name "$_dl_i")")
+        if [ "$_dl_i" -eq "$D_SEL" ]; then
+            _dl_mark="▸" _dl_name="$C_REV$_dl_name$C_OFF"
+        else
+            _dl_mark=" "
+        fi
+        _dl_path=$(path_encode "$(tg_path "$_dl_i")")
+        _dl_rest=$((D_COLS - _dl_w - 44))
+        [ "$_dl_rest" -lt 1 ] && _dl_rest=1
+        # shellcheck disable=SC2154 # set by eval
+        dash_add_line " $_dl_mark $_dl_name  $L_C$L_SYM $(printf '%-20s' "$_dl_tx")$C_OFF $(printf '%-15s' "$_dl_hw") $C_DIM$(fit "$_dl_path" "$_dl_rest")$C_OFF"
+        if [ "$_dl_lv" = "bad" ] || [ "$_dl_lv" = "warn" ]; then
+            [ -n "$_dl_dt" ] && dash_add_line "$_dl_pad$C_DIM$(fit "$_dl_dt" "$_dl_room")$C_OFF"
+            [ -n "$_dl_fx" ] && dash_add_line "${_dl_pad}fix: $(fit "$_dl_fx" $((_dl_room - 5)))"
+        fi
+        _dl_i=$((_dl_i + 1))
+    done
+    dash_add_line ""
+    dash_add_line " $(background_words "$D_BG")"
+    dash_finish "↑↓ move  ⏎ open  a add  e edit  s sync  p pause  b background  ? help  q quit"
+}
+
+# dash_prompt TEXT: reads a line with editing into D_IN; 1 when left empty
+dash_prompt() {
+    printf '\033[%s;1H\033[K\033[?25h' "$((D_LINES - 1))"
+    [ -n "${D_STTY:-}" ] && stty "$D_STTY" 2>/dev/null
+    D_IN=""
+    IFS= read -r -e -p " $1" D_IN || D_IN=""
+    stty -echo -icanon 2>/dev/null || :
+    printf '\033[?25l'
+    [ -n "$D_IN" ]
+}
+
+# dash_confirm TEXT DEFAULT(y|n) -> 0 for yes
+dash_confirm() {
+    if [ "$2" = "y" ]; then _dc_hint="[Y/n]"; else _dc_hint="[y/N]"; fi
+    printf '\033[%s;1H\033[K %s%s %s%s ' "$((D_LINES - 1))" "$C_BOLD" "$1" "$_dc_hint" "$C_OFF"
+    _dc=""
+    IFS= read -rsn1 _dc || :
+    case "$_dc" in
+        y|Y) return 0 ;;
+        n|N) return 1 ;;
+        "") [ "$2" = "y" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# dash_do MESSAGE CMD...: runs a syncto action in a subshell so its errors
+# cannot end the dashboard; sets D_MSG to MESSAGE or to the first error line.
+dash_do() {
+    _dd_msg=$1
+    shift
+    _dd_out=$( ("$@") 2>&1 ) && _dd_rc=0 || _dd_rc=$?
+    if [ "$_dd_rc" -eq 0 ]; then
+        D_MSG=$_dd_msg
+    else
+        D_MSG=$(printf '%s\n' "$_dd_out" | grep -v '^$' | head -n 1 | sed 's/^syncto: //')
+        [ -n "$D_MSG" ] || D_MSG="That did not work (exit $_dd_rc). See: syncto log"
+    fi
+    return "$_dd_rc"
+}
+
+# dash_apply_background: offers to reinstall the units after a watch change
+dash_apply_background() {
+    case "$D_BG" in
+        on|on+watch|stopped)
+            if dash_confirm "Apply this to background syncing now?" y; then
+                dash_do "Background syncing updated." cmd_start || :
+            fi
+            ;;
+    esac
+}
+
+# dash_sync INDEX: sync now, then say how it went in the repo's own health words
+dash_sync() {
+    _ds_name=$(tg_name "$1")
+    D_MSG="Syncing ${_ds_name}…"
+    dash_draw_list
+    dash_do "" cmd_sync "$_ds_name" || :
+    dash_refresh
+    eval "_ds_lv=\$D_LV_$1 _ds_tx=\$D_TX_$1"
+    # shellcheck disable=SC2154 # set by eval
+    if [ "$_ds_lv" = "ok" ]; then
+        D_MSG="Synced $_ds_name."
+    else
+        D_MSG="$_ds_name: $_ds_tx"
+    fi
+}
+
+dash_pause() {
+    _dp_name=$(tg_name "$1")
+    if tg_paused "$1"; then
+        dash_do "Resumed $_dp_name." cmd_edit "$_dp_name" paused=off || :
+    else
+        dash_do "Paused $_dp_name. Press p again to resume." cmd_edit "$_dp_name" paused=on || :
+    fi
+    dash_refresh
+}
+
+dash_remove() {
+    _dx_name=$(tg_name "$1")
+    if dash_confirm "Stop syncing $_dx_name? Its files stay." n; then
+        dash_do "Stopped syncing $_dx_name." cmd_remove "$_dx_name" || :
+        dash_refresh
+        return 0
+    fi
+    D_MSG=""
+    return 1
+}
+
+dash_background() {
+    case "$D_BG" in
+        on|on+watch)
+            if dash_confirm "Stop background syncing?" n; then
+                dash_do "Background syncing is off." cmd_stop || :
+            fi
+            ;;
+        *) dash_do "Background syncing is on." cmd_start || : ;;
+    esac
+    dash_refresh
+}
+
+dash_add() {
+    dash_header "Add a repo" ""
+    dash_add_line ""
+    dash_add_line "   Pick a folder that is a git checkout with a remote. Tab completes paths."
+    dash_add_line "   Leave an answer empty to cancel."
+    D_MSG=""
+    dash_finish ""
+    dash_prompt "Folder: " || return 0
+    _da_path=$(abs_path "$D_IN")
+    if [ ! -d "$_da_path" ]; then
+        D_MSG="No such folder: $(path_encode "$_da_path")"
+        return 0
+    fi
+    if ! git -C "$_da_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        D_MSG="$(path_encode "$_da_path") is not a git repo: run git init and add a remote first."
+        return 0
+    fi
+    _da_branch=$(git -C "$_da_path" symbolic-ref -q --short HEAD 2>/dev/null || printf '')
+    _da_remote=$G_REMOTE
+    if ! git -C "$_da_path" remote get-url "$_da_remote" >/dev/null 2>&1; then
+        _da_remote=$(git -C "$_da_path" remote 2>/dev/null | head -n 1)
+    fi
+    _da_url=""
+    [ -n "$_da_remote" ] && _da_url=$(git -C "$_da_path" remote get-url "$_da_remote" 2>/dev/null || printf '')
+
+    dash_header "Add a repo" ""
+    dash_add_line ""
+    dash_add_line "   Folder   $(path_encode "$_da_path")"
+    dash_add_line "   Branch   ${_da_branch:-none checked out}"
+    if [ -n "$_da_url" ]; then
+        dash_add_line "   Remote   $_da_remote  $_da_url"
+    else
+        dash_add_line "   Remote   ${C_WARN}none yet: syncing fails until you add one${C_OFF}"
+    fi
+    dash_finish ""
+    _da_def=$(basename "$_da_path" | sed 's/^\.//; s/[^A-Za-z0-9._-]/-/g')
+    dash_prompt "Name [$_da_def]: " || D_IN=$_da_def
+    _da_name=$D_IN
+    if dash_confirm "Sync on every save? (no: every $(human_every "$G_INTERVAL" | sed 's/^every //'))" y; then
+        _da_opts="watch=on"
+    else
+        _da_opts="watch=off"
+    fi
+    [ -n "$_da_branch" ] && [ "$_da_branch" != "$G_BRANCH" ] && _da_opts="$_da_opts,branch=$_da_branch"
+    [ -n "$_da_remote" ] && [ "$_da_remote" != "$G_REMOTE" ] && _da_opts="$_da_opts,remote=$_da_remote"
+    if dash_do "Added $_da_name." cmd_add "$_da_name" "$_da_path" "$_da_opts"; then
+        dash_refresh
+        _da_i=0
+        while [ "$_da_i" -lt "$D_N" ]; do
+            [ "$(tg_name "$_da_i")" = "$_da_name" ] && D_SEL=$_da_i
+            _da_i=$((_da_i + 1))
+        done
+        case "$D_BG" in
+            off) dash_confirm "Added $_da_name. Turn on background syncing now?" y &&
+                dash_do "Added $_da_name; background syncing is on." cmd_start ;;
+            *) [ "$_da_opts" != "${_da_opts#watch=on}" ] && dash_apply_background ;;
+        esac
+        dash_refresh
+    fi
+    return 0
+}
+
+# Fields of the edit screen: key|label|kind
+DASH_FIELDS="watch|Sync on every save|toggle
+paused|Paused|toggle
+interval|Scheduled every|secs
+mode|Direction|mode
+branch|Branch|text
+remote|Remote|text
+prefix|Commit prefix|text
+remote_poll|Check the remote every|secs_off
+stale|Alert after no sync for|stale
+guard|Guard command|text
+notify|Notify command|text
+peer|Peer command|text
+key|SSH key|text"
+
+# dash_field_value KEY -> the effective value in words (uses t_*)
+dash_field_value() {
+    case "$1" in
+        watch) printf '%s' "$t_watch" ;;
+        paused) printf '%s' "$t_paused" ;;
+        interval) human_every "$t_interval" | sed 's/^every //' ;;
+        mode)
+            case "$t_mode" in
+                push) printf 'push only' ;;
+                pull) printf 'pull only' ;;
+                *) printf 'both ways' ;;
+            esac
+            ;;
+        remote_poll)
+            if [ "$t_remote_poll" -gt 0 ] 2>/dev/null; then
+                human_every "$t_remote_poll" | sed 's/^every //'
+            else
+                printf 'off'
+            fi
+            ;;
+        stale)
+            case "$t_stale" in
+                off) printf 'off' ;;
+                0) printf 'auto (%s)' "$(human_ago "$(stale_limit)" | sed 's/ ago$//')" ;;
+                *) human_ago "$t_stale" | sed 's/ ago$//' ;;
+            esac
+            ;;
+        *) eval "_fv=\${t_$1:-}"; printf '%s' "${_fv:-none}" ;;
+    esac
+}
+
+dash_edit() {
+    _de_name=$(tg_name "$1")
+    _de_sel=0
+    _de_count=$(printf '%s\n' "$DASH_FIELDS" | wc -l | tr -d ' ')
+    D_MSG=""
+    while :; do
+        dash_size
+        targets_load
+        _de_i=$(tg_index_of "$_de_name") || return 0
+        _de_opts=$(tg_opts "$_de_i")
+        resolve_opts "$_de_opts" || :
+        dash_header "Edit $_de_name" ""
+        _de_n=0
+        while IFS='|' read -r _de_key _de_label _de_kind; do
+            _de_val=$(dash_field_value "$_de_key")
+            _de_tag=""
+            opt_is_set "$_de_opts" "$_de_key" || _de_tag=" ${C_DIM}(default)$C_OFF"
+            if [ "$_de_n" -eq "$_de_sel" ]; then
+                dash_add_line " ▸ $C_REV$(printf '%-24s' "$_de_label")$C_OFF $(fit "$_de_val" $((D_COLS - 40)))$_de_tag"
+            else
+                dash_add_line "   $(printf '%-24s' "$_de_label") $(fit "$_de_val" $((D_COLS - 40)))$_de_tag"
+            fi
+            _de_n=$((_de_n + 1))
+        done <<EOF
+$DASH_FIELDS
+EOF
+        dash_finish "↑↓ choose  ⏎ change  - reset to default  ← back"
+        dash_key
+        case "$D_KEY" in
+            tick) continue ;;
+            up) [ "$_de_sel" -gt 0 ] && _de_sel=$((_de_sel - 1)) ;;
+            down) [ "$_de_sel" -lt $((_de_count - 1)) ] && _de_sel=$((_de_sel + 1)) ;;
+            left|esc|q) D_MSG=""; return 0 ;;
+            -)
+                _de_line=$(printf '%s\n' "$DASH_FIELDS" | sed -n "$((_de_sel + 1))p")
+                _de_key=${_de_line%%|*}
+                _de_label=${_de_line#*|}
+                dash_do "${_de_label%|*} is back to the default." cmd_edit "$_de_name" "$_de_key=" || :
+                case "$_de_key" in watch|remote_poll) dash_apply_background ;; esac
+                ;;
+            enter|right) dash_edit_field "$_de_name" "$(printf '%s\n' "$DASH_FIELDS" | sed -n "$((_de_sel + 1))p")" ;;
+            *) D_MSG="" ;;
+        esac
+    done
+}
+
+# dash_edit_field NAME "key|label|kind"
+dash_edit_field() {
+    _ef_key=${2%%|*}
+    _ef_kind=${2##*|}
+    _ef_label=${2#*|}
+    _ef_label=${_ef_label%|*}
+    _ef_val=""
+    case "$_ef_kind" in
+        toggle)
+            eval "_ef_cur=\$t_$_ef_key"
+            # shellcheck disable=SC2154 # set by eval
+            if [ "$_ef_cur" = "on" ]; then _ef_val=off; else _ef_val=on; fi
+            ;;
+        mode)
+            case "$t_mode" in
+                sync) _ef_val=push ;;
+                push) _ef_val=pull ;;
+                *) _ef_val=sync ;;
+            esac
+            ;;
+        secs|secs_off|stale)
+            _ef_hint="like 10m, 1h or 90s"
+            [ "$_ef_kind" = "secs_off" ] && _ef_hint="$_ef_hint, or off"
+            [ "$_ef_kind" = "stale" ] && _ef_hint="$_ef_hint, off, or auto"
+            dash_prompt "$_ef_label ($_ef_hint): " || return 0
+            case "$D_IN" in
+                off) [ "$_ef_kind" = "secs" ] || _ef_val=off ;;
+                auto) [ "$_ef_kind" = "stale" ] && _ef_val=0 ;;
+                *) _ef_val=$(parse_duration "$D_IN") || _ef_val="" ;;
+            esac
+            if [ -z "$_ef_val" ]; then
+                D_MSG="'$D_IN' is not a duration ($_ef_hint)."
+                return 0
+            fi
+            ;;
+        *)
+            dash_prompt "$_ef_label (empty keeps it): " || return 0
+            _ef_val=$(printf '%s' "$D_IN" | sed 's/,/\\,/g')
+            ;;
+    esac
+    dash_do "" cmd_edit "$1" "$_ef_key=$_ef_val" || return 0
+    targets_load
+    resolve_opts "$(tg_opts "$(tg_index_of "$1")")" || :
+    D_MSG="$_ef_label: $(dash_field_value "$_ef_key")"
+    case "$_ef_key" in watch|remote_poll) dash_apply_background ;; esac
+    return 0
+}
+
+# dash_details INDEX: one repo in full, with its recent activity
+dash_details() {
+    _dt_name=$(tg_name "$1")
+    D_MSG=""
+    while :; do
+        dash_size
+        targets_load
+        _dt_i=$(tg_index_of "$_dt_name") || return 0
+        target_health "$_dt_i"
+        level_style "$H_LEVEL"
+        _dt_path=$(tg_path "$_dt_i")
+        dash_header "$_dt_name" "$L_C$L_SYM $H_TEXT$C_OFF"
+        _dt_url=$(git -C "$_dt_path" remote get-url "$t_remote" 2>/dev/null || printf 'not set up')
+        case "$t_mode" in
+            push) _dt_dir="push only, never pulls" ;;
+            pull) _dt_dir="pull only, never commits" ;;
+            *) _dt_dir="both ways" ;;
+        esac
+        if [ "$t_watch" = "on" ]; then
+            _dt_when="on every save, and $(human_every "$t_interval") as a backstop"
+        else
+            _dt_when=$(human_every "$t_interval")
+        fi
+        _dt_w=$((D_COLS - 15))
+        dash_add_line ""
+        dash_add_line "   Folder     $(fit "$(path_encode "$_dt_path")" "$_dt_w")"
+        dash_add_line "   Remote     $(fit "$t_remote, $_dt_url" "$_dt_w")"
+        dash_add_line "   Branch     $t_branch"
+        dash_add_line "   Syncs      $(fit "$_dt_when, $_dt_dir" "$_dt_w")"
+        [ "$t_remote_poll" -gt 0 ] 2>/dev/null &&
+            dash_add_line "              $(fit "checks the remote $(human_every "$t_remote_poll")" "$_dt_w")"
+        dash_add_line "   Commits    $(fit "\"$t_prefix: notes.md\", \"$t_prefix: 3 files\"" "$_dt_w")"
+        [ "$t_paused" = "on" ] && dash_add_line "   Paused     yes: background syncing skips it"
+        [ -n "$t_guard" ] && dash_add_line "   Guard      $(fit "$t_guard" "$_dt_w")"
+        [ -n "$t_notify" ] && dash_add_line "   Notify     $(fit "$t_notify" "$_dt_w")"
+        [ -n "$t_peer" ] && dash_add_line "   Peer       $(fit "$t_peer" "$_dt_w")"
+        if [ -n "$H_DETAIL" ] || { [ -n "$H_FIX" ] && [ "$H_LEVEL" != "wait" ]; }; then
+            dash_add_line ""
+            [ -n "$H_DETAIL" ] && dash_add_line "   $L_C$(fit "$H_DETAIL" $((D_COLS - 4)))$C_OFF"
+            if [ "$H_LEVEL" = "bad" ] || [ "$H_LEVEL" = "warn" ]; then
+                [ -n "$H_FIX" ] && dash_add_line "   fix: $(fit "$H_FIX" $((D_COLS - 9)))"
+            fi
+        fi
+        dash_add_line ""
+        dash_add_line "   ${C_BOLD}Recent activity$C_OFF"
+        _dt_room=$((D_LINES - D_FL - 3))
+        if [ "$_dt_room" -gt 0 ] && [ -f "$LOG_FILE" ]; then
+            while IFS= read -r _dt_l; do
+                _dt_ts=${_dt_l%% *}
+                _dt_msg=${_dt_l#*msg=\"}
+                _dt_msg=${_dt_msg%\"}
+                case "$_dt_msg" in
+                    "sync ok ("*"committed=1"*) _dt_msg="synced: committed and pushed" ;;
+                    "sync ok ("*"pulled=0"*) _dt_msg="synced: pushed, pull left for later" ;;
+                    "sync ok ("*) _dt_msg="synced" ;;
+                    "committed: "*) _dt_msg="committed \"${_dt_msg#committed: }\"" ;;
+                esac
+                dash_add_line "   $C_DIM${_dt_ts:5:5} ${_dt_ts:11:5}$C_OFF  $(fit "$_dt_msg" $((D_COLS - 16)))"
+            done <<EOF
+$(grep -F " target=$_dt_name msg=" "$LOG_FILE" 2>/dev/null | tail -n "$_dt_room")
+EOF
+        fi
+        dash_finish "e edit  s sync now  p pause  x remove  ← back"
+        dash_key
+        case "$D_KEY" in
+            tick) continue ;;
+            left|esc|q) D_MSG=""; return 0 ;;
+            e) dash_edit "$_dt_i" ;;
+            s)
+                D_MSG="Syncing ${_dt_name}…"
+                dash_finish "e edit  s sync now  p pause  x remove  ← back"
+                dash_do "" cmd_sync "$_dt_name" || :
+                target_health "$_dt_i"
+                if [ "$H_LEVEL" = "ok" ]; then D_MSG="Synced $_dt_name."; else D_MSG="$_dt_name: $H_TEXT"; fi
+                ;;
+            p) dash_pause "$_dt_i" ;;
+            x) dash_remove "$_dt_i" && return 0 ;;
+            *) D_MSG="" ;;
+        esac
+    done
+}
+
+dash_help() {
+    dash_size
+    dash_header "How syncto works" ""
+    dash_add_line ""
+    dash_add_line "   Each repo is a git folder with a remote. A sync commits your changes,"
+    dash_add_line "   pulls with rebase and pushes. Background syncing (b) runs it on a"
+    dash_add_line "   schedule, and right after a save for repos set to sync on save."
+    dash_add_line "   If both sides changed the same lines, syncto stops, leaves the repo"
+    dash_add_line "   as it was and shows what to run to fix it."
+    dash_add_line ""
+    dash_add_line "   ${C_OK}✓$C_OFF synced   ${C_DIM}·$C_OFF waiting: new, paused or offline   $C_WARN!$C_OFF no sync for a while   ${C_BAD}✗$C_OFF needs you"
+    dash_add_line ""
+    dash_add_line "   ↑ ↓  choose a repo        ⏎  details and recent activity"
+    dash_add_line "   a    add a repo           e  edit its settings"
+    dash_add_line "   s    sync now             p  pause or resume"
+    dash_add_line "   x    stop syncing it      b  background syncing on or off"
+    dash_add_line "   q    quit"
+    dash_add_line ""
+    dash_add_line "   The same from the command line: syncto help"
+    D_MSG=""
+    dash_finish "any key: back"
+    D_TICK=3600
+    dash_key
+    D_TICK=5
+}
+
+cmd_dashboard() {
+    D_SEL=0 D_TOP=0 D_MSG="" D_TICK=5
+    colors_init
+    dash_enter
+    dash_refresh
+    while :; do
+        dash_draw_list
+        dash_key
+        case "$D_KEY" in
+            tick) dash_refresh ;;
+            up) [ "$D_SEL" -gt 0 ] && D_SEL=$((D_SEL - 1)); D_MSG="" ;;
+            down) [ "$D_SEL" -lt $((D_N - 1)) ] && D_SEL=$((D_SEL + 1)); D_MSG="" ;;
+            q|esc) break ;;
+            a) dash_add ;;
+            b) dash_background ;;
+            '?') dash_help ;;
+            *)
+                if [ "$D_N" -eq 0 ]; then
+                    D_MSG=""
+                    continue
+                fi
+                case "$D_KEY" in
+                    enter|right) dash_details "$D_SEL"; dash_refresh ;;
+                    e) dash_edit "$D_SEL"; dash_refresh ;;
+                    s) dash_sync "$D_SEL" ;;
+                    p) dash_pause "$D_SEL" ;;
+                    x) dash_remove "$D_SEL" || : ;;
+                    *) D_MSG="" ;;
+                esac
+                ;;
+        esac
+    done
+    dash_leave
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # help
 # ---------------------------------------------------------------------------
 
@@ -2024,7 +2719,8 @@ USAGE
   syncto [-v] [COMMAND]
 
 COMMANDS
-  status                    how every sync is doing (also: plain 'syncto')
+  (none)                    dashboard: see, add, edit, pause and sync repos
+  status                    how every sync is doing, as text
   add NAME PATH [K=V ...]   start syncing a repo
   edit NAME K=V ...         change a sync's options; K= resets one to its default
   edit                      open the targets file in \$EDITOR
@@ -2139,7 +2835,14 @@ main() {
     fi
 
     case "$action" in
-        ""|status) cmd_status ;;
+        "")
+            if dash_can_run; then
+                cmd_dashboard
+            else
+                cmd_status
+            fi
+            ;;
+        status) cmd_status ;;
         add) cmd_add "$@" ;;
         edit) cmd_edit "$@" ;;
         remove) cmd_remove "${1:-}" ;;
