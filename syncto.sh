@@ -18,6 +18,7 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/syncto"
 LOCK_DIR="$STATE_DIR/locks"
 LAST_DIR="$STATE_DIR/last"
 OK_DIR="$STATE_DIR/lastok"
+OUTCOME_DIR="$STATE_DIR/outcome"
 
 # Absolute path of this script, without readlink -f (not portable).
 SELF="$0"
@@ -25,7 +26,6 @@ case "$SELF" in
     /*) : ;;
     *)  SELF="$PWD/$SELF" ;;
 esac
-SELF_DIR=$(dirname "$SELF")
 
 VERBOSE=0
 # 1 under -d/-w: the units already send stderr to LOG_FILE.
@@ -627,12 +627,12 @@ sync_one() {
     fi
 
     if [ ! -d "$path" ]; then
-        log error "$name" "path does not exist: $path"
+        outcome "$name" error "path does not exist: $path"
         lock_release
         return 3
     fi
     if ! git_in "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        log error "$name" "not a git working tree: $path"
+        outcome "$name" error "not a git working tree: $path"
         lock_release
         return 3
     fi
@@ -672,14 +672,14 @@ sync_locked() {
         esac
         if [ -d "$_gitdir/rebase-merge" ] || [ -d "$_gitdir/rebase-apply" ] ||
            [ -f "$_gitdir/MERGE_HEAD" ] || [ -f "$_gitdir/CHERRY_PICK_HEAD" ]; then
-            log conflict "$name" "an unfinished rebase/merge is in progress, needs a human"
+            outcome "$name" conflict "an unfinished rebase/merge is in progress, needs a human"
             return 2
         fi
     fi
 
     _head=$(git_in "$path" symbolic-ref -q --short HEAD 2>/dev/null || printf '')
     if [ -z "$_head" ]; then
-        log conflict "$name" "HEAD is detached, refusing to sync"
+        outcome "$name" conflict "HEAD is detached, refusing to sync"
         return 2
     fi
     if [ "$_head" != "$t_branch" ]; then
@@ -694,7 +694,7 @@ sync_locked() {
     if [ "$t_mode" != "pull" ]; then
         _out=""
         if ! _out=$(git_in "$path" add -A 2>&1); then
-            log error "$name" "git add -A failed: $_out"
+            outcome "$name" error "git add -A failed: $_out"
             return 1
         fi
         if git_in "$path" diff --cached --quiet 2>/dev/null; then
@@ -715,7 +715,7 @@ sync_locked() {
             _crc=0
             _out=$(git_in "$path" commit -m "$_msg" 2>&1) || _crc=$?
             if [ "$_crc" -ne 0 ]; then
-                log error "$name" "commit failed ($_crc): $_out"
+                outcome "$name" error "commit failed ($_crc): $_out"
                 return 1
             fi
             _committed=1
@@ -765,12 +765,12 @@ sync_locked() {
         fi
         if [ "$_prc" -ne 0 ] && is_transport_error "$_out"; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
-            log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
+            outcome "$name" offline "$_out"
             return 0
         fi
         if [ "$_prc" -ne 0 ] && is_auth_error "$_out"; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
-            log error "$name" "pull failed, authentication refused: $(oneline "$_out")"
+            outcome "$name" error "pull failed, authentication refused: $_out"
             return 1
         fi
         if [ "$_prc" -ne 0 ]; then
@@ -784,7 +784,7 @@ sync_locked() {
         fi
         if [ "$_prc" -ne 0 ]; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
-            log conflict "$name" "pull --rebase failed, aborted: $_out"
+            outcome "$name" conflict "pull --rebase failed, aborted: $_out"
             if [ -n "$t_notify" ] && notify_due "$name"; then
                 _nout=""
                 _nrc=0
@@ -813,16 +813,17 @@ sync_locked() {
                 esac
             fi
             if is_transport_error "$_out"; then
-                log warn "$name" "network unreachable, retrying next pass: $(oneline "$_out")"
+                outcome "$name" offline "$_out"
                 return 0
             fi
-            log error "$name" "push failed ($_prc): $_out"
+            outcome "$name" error "push failed ($_prc): $_out"
             return 1
         fi
     fi
 
     notify_clear "$name"
     mark_ok "$name"
+    rm -f "$OUTCOME_DIR/$(safe_name "$name")" 2>/dev/null || :
     _pulled=1
     [ "$_pull_skipped" -eq 1 ] && _pulled=0
     [ "$t_mode" = "push" ] && _pulled=0
@@ -860,15 +861,39 @@ last_ok() {
     printf '%s' "$_lo_v"
 }
 
+# outcome NAME KIND MESSAGE: log a failed pass and keep it for status.
+# KIND is conflict, error or offline (logged as warn).
+outcome() {
+    if [ "$2" = "offline" ]; then
+        log warn "$1" "network unreachable, retrying next pass: $3"
+    else
+        log "$2" "$1" "$3"
+    fi
+    mkdir -p "$OUTCOME_DIR" 2>/dev/null || :
+    printf '%s\t%s\t%s\n' "$2" "$(epoch)" "$(oneline "$3")" \
+        >"$OUTCOME_DIR/$(safe_name "$1")" 2>/dev/null || :
+    return 0
+}
+
+# stale_limit -> seconds without a sync before a target is stale, or "off".
+# 0 derives it from the interval. Uses the caller's t_*.
+stale_limit() {
+    if [ "$t_stale" = "off" ]; then
+        printf 'off'
+        return 0
+    fi
+    _sl=$t_stale
+    [ "$_sl" -eq 0 ] && _sl=$((t_interval * 12))
+    [ "$_sl" -lt 600 ] && _sl=600
+    printf '%s' "$_sl"
+}
+
 # stale_check NAME: alert when a target has not synced for too long,
 # whatever the cause. Uses the caller's t_*.
 stale_check() {
     _sc_name=$1
-    [ "$t_stale" = "off" ] && return 0
-    _sc_limit=$t_stale
-    # 0 means derive it from the interval.
-    [ "$_sc_limit" -eq 0 ] && _sc_limit=$((t_interval * 12))
-    [ "$_sc_limit" -lt 600 ] && _sc_limit=600
+    _sc_limit=$(stale_limit)
+    [ "$_sc_limit" = "off" ] && return 0
     _sc_last=$(last_ok "$_sc_name")
     if [ "$_sc_last" -eq 0 ]; then
         # First run: start the clock instead of alerting.
@@ -882,7 +907,7 @@ stale_check() {
         _sc_out=""
         _sc_rc=0
         _sc_out=$(run_hook "$t_notify" "$path" "$_sc_name" \
-            "syncto: $_sc_name has not synced in ${_sc_age}s — check the log") || _sc_rc=$?
+            "syncto: $_sc_name has not synced in ${_sc_age}s, see: syncto status") || _sc_rc=$?
         if [ "$_sc_rc" -ne 0 ]; then
             log warn "$_sc_name" "notify hook exited $_sc_rc: $_sc_out"
         fi
@@ -914,7 +939,7 @@ last_run() {
 
 no_targets_notice() {
     printf 'No targets configured yet.\n' >&2
-    printf 'Add one with:  syncto --add NAME PATH [key=value ...]\n' >&2
+    printf 'Add one with:  syncto add NAME PATH [key=value ...]\n' >&2
 }
 
 cmd_sync() {
@@ -967,7 +992,7 @@ cmd_sync() {
     return "$_cs_rc"
 }
 
-cmd_daemon() {
+cmd_run() {
     targets_load
     if [ "$TG_COUNT" -eq 0 ]; then
         log info "" "no targets configured"
@@ -1005,62 +1030,217 @@ cmd_daemon() {
     return "$_cd_rc"
 }
 
-cmd_list() {
+# human_ago SECONDS -> "just now", "4 min ago", "3 h ago", "2 days ago"
+human_ago() {
+    if [ "$1" -lt 60 ]; then
+        printf 'just now'
+    elif [ "$1" -lt 3600 ]; then
+        printf '%s min ago' $(($1 / 60))
+    elif [ "$1" -lt 172800 ]; then
+        printf '%s h ago' $(($1 / 3600))
+    else
+        printf '%s days ago' $(($1 / 86400))
+    fi
+}
+
+# human_every SECONDS -> "every 10 min", "every 1 h", "every 90 s"
+human_every() {
+    if [ $(($1 % 3600)) -eq 0 ]; then
+        printf 'every %s h' $(($1 / 3600))
+    elif [ $(($1 % 60)) -eq 0 ]; then
+        printf 'every %s min' $(($1 / 60))
+    else
+        printf 'every %s s' "$1"
+    fi
+}
+
+# cd_hint PATH -> a cd command a user can paste
+cd_hint() {
+    case "$1" in
+        *" "*) printf 'cd "%s"' "$1" ;;
+        *) printf 'cd %s' "$(path_encode "$1")" ;;
+    esac
+}
+
+# target_health INDEX: sets H_LEVEL (ok, wait, warn, bad), H_TEXT, H_DETAIL,
+# H_FIX and H_HOW for that target, in words a person can act on.
+target_health() {
+    _th_name=$(tg_name "$1")
+    _th_path=$(tg_path "$1")
+    resolve_opts "$(tg_opts "$1")" || :
+    H_DETAIL=""
+    H_FIX=""
+    if [ "$t_watch" = "on" ]; then
+        H_HOW="on save"
+    else
+        H_HOW=$(human_every "$t_interval")
+    fi
+    case "$t_mode" in
+        push) H_HOW="$H_HOW, push only" ;;
+        pull) H_HOW="$H_HOW, pull only" ;;
+    esac
+
+    if [ ! -d "$_th_path" ]; then
+        H_LEVEL=bad H_TEXT="folder is missing" H_FIX="restore it, or: syncto remove $_th_name"
+        return 0
+    fi
+    if ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        H_LEVEL=bad H_TEXT="not a git repo" H_FIX="git init it, or: syncto remove $_th_name"
+        return 0
+    fi
+
+    _th_now=$(epoch)
+    _th_ok=$(last_ok "$_th_name")
+    _th_kind=""
+    _th_msg=""
+    _th_f="$OUTCOME_DIR/$(safe_name "$_th_name")"
+    if [ -f "$_th_f" ]; then
+        IFS="$TAB" read -r _th_kind _th_since _th_msg <"$_th_f" || :
+    fi
+    _th_cd=$(cd_hint "$_th_path")
+    case "$_th_kind" in
+        conflict)
+            H_LEVEL=bad H_TEXT="needs you"
+            case "$_th_msg" in
+                *"unfinished rebase"*)
+                    H_DETAIL="a rebase or merge was left unfinished"
+                    H_FIX="$_th_cd && git status, then finish or abort it"
+                    ;;
+                *"HEAD is detached"*)
+                    H_DETAIL="HEAD is detached"
+                    H_FIX="$_th_cd && git switch $t_branch"
+                    ;;
+                *)
+                    _th_files=$(printf '%s\n' "$_th_msg" | grep -o 'Merge conflict in [^ ]*' |
+                        sed 's/^Merge conflict in //' | sort -u | paste -sd, - | sed 's/,/, /g')
+                    if [ -n "$_th_files" ]; then
+                        H_DETAIL="both sides changed $_th_files"
+                    else
+                        H_DETAIL="the pull could not be applied: $_th_msg"
+                    fi
+                    H_FIX="$_th_cd && git pull --rebase, fix the files, git rebase --continue"
+                    ;;
+            esac
+            return 0
+            ;;
+        error)
+            H_LEVEL=bad H_TEXT="failing"
+            case "$_th_msg" in
+                *"authentication refused"*)
+                    H_DETAIL="the remote refused the credentials"
+                    H_FIX="check the ssh key (key= option) can push to $t_remote"
+                    ;;
+                *) H_DETAIL=$_th_msg ;;
+            esac
+            return 0
+            ;;
+        offline)
+            H_LEVEL=wait H_TEXT="offline, retrying"
+            if [ "$_th_ok" -gt 0 ]; then
+                H_DETAIL="last synced $(human_ago $((_th_now - _th_ok))). $_th_msg"
+            else
+                H_DETAIL=$_th_msg
+            fi
+            return 0
+            ;;
+    esac
+
+    if [ "$(last_run "$_th_name")" -eq 0 ]; then
+        H_LEVEL=wait H_TEXT="not synced yet"
+        return 0
+    fi
+    _th_limit=$(stale_limit)
+    if [ "$_th_limit" != "off" ] && [ $((_th_now - _th_ok)) -ge "$_th_limit" ]; then
+        H_LEVEL=warn H_TEXT="no sync for $(human_ago $((_th_now - _th_ok)) | sed 's/ ago$//')"
+        H_DETAIL="passes keep being skipped (guard, or edits in progress)"
+        H_FIX="syncto log"
+        return 0
+    fi
+    H_LEVEL=ok H_TEXT="synced $(human_ago $((_th_now - _th_ok)))"
+    return 0
+}
+
+# background_state -> "on", "on+watch", "stopped" (installed, not running) or "off"
+background_state() {
+    case "$(uname -s)" in
+        Darwin)
+            [ -f "$(plist_path)" ] || { printf 'off'; return 0; }
+            launchctl print "gui/$(id -u)/$SYNCTO_LABEL" >/dev/null 2>&1 || { printf 'stopped'; return 0; }
+            if [ -f "$(watch_plist_path)" ] &&
+               launchctl print "gui/$(id -u)/$SYNCTO_LABEL-watch" >/dev/null 2>&1; then
+                printf 'on+watch'
+            else
+                printf 'on'
+            fi
+            ;;
+        Linux)
+            [ -f "$(systemd_dir)/syncto.timer" ] || { printf 'off'; return 0; }
+            systemctl --user is-active --quiet syncto.timer 2>/dev/null || { printf 'stopped'; return 0; }
+            if [ -f "$(systemd_dir)/syncto-watch.service" ] &&
+               systemctl --user is-active --quiet syncto-watch.service 2>/dev/null; then
+                printf 'on+watch'
+            else
+                printf 'on'
+            fi
+            ;;
+        *) printf 'off' ;;
+    esac
+}
+
+cmd_status() {
     targets_load
     if [ "$TG_COUNT" -eq 0 ]; then
         no_targets_notice
         return 0
     fi
 
-    _cl_w=4
-    _cl_i=0
-    while [ "$_cl_i" -lt "$TG_COUNT" ]; do
-        _cl_name=$(tg_name "$_cl_i")
-        _cl_n=${#_cl_name}
-        if [ "$_cl_n" -gt "$_cl_w" ]; then
-            _cl_w=$_cl_n
+    C_OK="" C_WAIT="" C_WARN="" C_BAD="" C_DIM="" C_OFF=""
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+        C_OK=$(printf '\033[32m') C_WAIT=$(printf '\033[2m') C_WARN=$(printf '\033[33m')
+        C_BAD=$(printf '\033[31m') C_DIM=$(printf '\033[2m') C_OFF=$(printf '\033[0m')
+    fi
+    _st_cols=${COLUMNS:-$(tput cols 2>/dev/null || printf '100')}
+    case "$_st_cols" in ''|*[!0-9]*) _st_cols=100 ;; esac
+
+    _st_w=4
+    _st_i=0
+    while [ "$_st_i" -lt "$TG_COUNT" ]; do
+        _st_n=$(tg_name "$_st_i")
+        [ "${#_st_n}" -gt "$_st_w" ] && _st_w=${#_st_n}
+        _st_i=$((_st_i + 1))
+    done
+    _st_pad=$(printf "%$((_st_w + 4))s" "")
+    _st_room=$((_st_cols - _st_w - 4))
+    [ "$_st_room" -lt 20 ] && _st_room=20
+
+    _st_i=0
+    while [ "$_st_i" -lt "$TG_COUNT" ]; do
+        target_health "$_st_i"
+        case "$H_LEVEL" in
+            ok) _st_sym="✓" _st_c=$C_OK ;;
+            wait) _st_sym="·" _st_c=$C_WAIT ;;
+            warn) _st_sym="!" _st_c=$C_WARN ;;
+            *) _st_sym="✗" _st_c=$C_BAD ;;
+        esac
+        printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$(tg_name "$_st_i")" \
+            "$_st_c" "$_st_sym" "$H_TEXT" "$C_OFF" "$H_HOW" "$(path_encode "$(tg_path "$_st_i")")"
+        _st_line=$H_DETAIL
+        # Long git output is cut to the terminal width; the fix line never is.
+        if [ -t 1 ] && [ "${#_st_line}" -gt "$_st_room" ]; then
+            _st_line="$(printf '%s' "$_st_line" | cut -c1-$((_st_room - 1)))…"
         fi
-        _cl_i=$((_cl_i + 1))
+        [ -n "$_st_line" ] && printf '%s%s%s%s\n' "$_st_pad" "$C_DIM" "$_st_line" "$C_OFF"
+        [ -n "$H_FIX" ] && printf '%sfix: %s\n' "$_st_pad" "$H_FIX"
+        _st_i=$((_st_i + 1))
     done
 
-    printf "%-${_cl_w}s  %-6s  %-5s  %-8s  %-12s  %-14s  %s\n" \
-        NAME MODE WATCH EVERY BRANCH STATE PATH
-    _cl_i=0
-    while [ "$_cl_i" -lt "$TG_COUNT" ]; do
-        _cl_name=$(tg_name "$_cl_i")
-        _cl_path=$(tg_path "$_cl_i")
-        resolve_opts "$(tg_opts "$_cl_i")" || :
-        _cl_state="ok"
-        if [ ! -d "$_cl_path" ]; then
-            _cl_state="missing"
-        elif ! git_in "$_cl_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            _cl_state="not a repo"
-        else
-            _cl_dirty=$(git_in "$_cl_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-            case "$_cl_dirty" in
-                ''|*[!0-9]*) _cl_dirty=0 ;;
-            esac
-            _cl_ab=$(git_in "$_cl_path" rev-list --left-right --count \
-                "$t_branch...$t_remote/$t_branch" 2>/dev/null || printf '')
-            _cl_arrow=""
-            if [ -n "$_cl_ab" ]; then
-                _cl_ahead=$(printf '%s' "$_cl_ab" | awk '{print $1}')
-                _cl_behind=$(printf '%s' "$_cl_ab" | awk '{print $2}')
-                if [ "${_cl_ahead:-0}" != "0" ] || [ "${_cl_behind:-0}" != "0" ]; then
-                    _cl_arrow=" +$_cl_ahead/-$_cl_behind"
-                fi
-            fi
-            if [ "$_cl_dirty" -eq 0 ]; then
-                _cl_state="clean$_cl_arrow"
-            else
-                _cl_state="$_cl_dirty dirty$_cl_arrow"
-            fi
-        fi
-        printf "%-${_cl_w}s  %-6s  %-5s  %-8s  %-12s  %-14s  %s\n" \
-            "$_cl_name" "$t_mode" "$t_watch" "${t_interval}s" "$t_branch" \
-            "$_cl_state" "$(path_encode "$_cl_path")"
-        _cl_i=$((_cl_i + 1))
-    done
+    printf '\n'
+    case "$(background_state)" in
+        on+watch) printf 'Background: on, %s, and on every save.\n' "$(human_every "$G_INTERVAL")" ;;
+        on) printf 'Background: on, %s.\n' "$(human_every "$G_INTERVAL")" ;;
+        stopped) printf "Background: installed but not running. Restart it with: syncto start\n" ;;
+        *) printf "Background: off. Turn it on with: syncto start\n" ;;
+    esac
     if [ "$TG_MALFORMED" -eq 1 ]; then
         return 3
     fi
@@ -1079,11 +1259,63 @@ ensure_targets_file() {
     return 0
 }
 
+# opts_from_args MODE ARGS...: validated key=value lines from options given one
+# per argument, comma joined, or any mix. MODE edit accepts "key=" (reset).
+opts_from_args() {
+    _oa_mode=$1
+    shift
+    for _oa_arg in "$@"; do
+        while IFS= read -r _oa_kv; do
+            _oa_kv=$(trim "$_oa_kv")
+            [ -n "$_oa_kv" ] || continue
+            case "$_oa_kv" in
+                *=*) : ;;
+                *) die 3 "options must be key=value, got '$_oa_kv'" ;;
+            esac
+            _oa_k=$(trim "${_oa_kv%%=*}")
+            _oa_v=${_oa_kv#*=}
+            known_key "$_oa_k" || die 3 "unknown option '$_oa_k'"
+            if [ -n "$_oa_v" ] || [ "$_oa_mode" != "edit" ]; then
+                validate_value "$_oa_k" "$_oa_v" || die 3 "bad value for '$_oa_k'"
+            fi
+            printf '%s=%s\n' "$_oa_k" "$_oa_v"
+        done <<EOF
+$(split_opts "$_oa_arg")
+EOF
+    done
+}
+
+# opts_join: key=value lines on stdin -> one comma list, commas in values escaped.
+opts_join() {
+    _oj=""
+    while IFS= read -r _oj_kv; do
+        [ -n "$_oj_kv" ] || continue
+        _oj_kv="${_oj_kv%%=*}=$(printf '%s' "${_oj_kv#*=}" | sed 's/,/\\,/g')"
+        _oj="${_oj:+$_oj,}$_oj_kv"
+    done
+    printf '%s' "$_oj"
+}
+
+# targets_rewrite NAME LINE: replace NAME's line with LINE, or drop it if LINE is empty.
+targets_rewrite() {
+    _tr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
+    while IFS= read -r _tr_line || [ -n "$_tr_line" ]; do
+        _tr_first=${_tr_line%%"$TAB"*}
+        if [ "$_tr_first" = "$1" ] && [ "$_tr_first" != "$_tr_line" ]; then
+            [ -n "$2" ] && printf '%s\n' "$2" >>"$_tr_tmp"
+            continue
+        fi
+        printf '%s\n' "$_tr_line" >>"$_tr_tmp"
+    done <"$TARGETS_FILE"
+    cat "$_tr_tmp" >"$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
+    rm -f "$_tr_tmp"
+}
+
 cmd_add() {
     _ca_name=${1:-}
     _ca_path=${2:-}
-    [ -n "$_ca_name" ] || die 3 "usage: syncto --add NAME PATH [key=value ...]"
-    [ -n "$_ca_path" ] || die 3 "usage: syncto --add NAME PATH [key=value ...]"
+    [ -n "$_ca_name" ] || die 3 "usage: syncto add NAME PATH [key=value ...]"
+    [ -n "$_ca_path" ] || die 3 "usage: syncto add NAME PATH [key=value ...]"
     shift 2 || :
 
     case "$_ca_name" in
@@ -1098,34 +1330,11 @@ cmd_add() {
         die 3 "target '$_ca_name' already exists (remove it first, or edit the file)"
     fi
 
-    # Options may be given one per argument, comma joined, or any mix.
-    _ca_opts=""
-    for _ca_arg in "$@"; do
-        while IFS= read -r _ca_kv; do
-            _ca_kv=$(trim "$_ca_kv")
-            [ -n "$_ca_kv" ] || continue
-            case "$_ca_kv" in
-                *=*) : ;;
-                *) die 3 "options must be key=value, got '$_ca_kv'" ;;
-            esac
-            _ca_k=$(trim "${_ca_kv%%=*}")
-            _ca_v=${_ca_kv#*=}
-            known_key "$_ca_k" || die 3 "unknown option '$_ca_k'"
-            validate_value "$_ca_k" "$_ca_v" || die 3 "bad value for '$_ca_k'"
-            # commas inside a value have to survive the round trip
-            _ca_v=$(printf '%s' "$_ca_v" | sed 's/,/\\,/g')
-            if [ -n "$_ca_opts" ]; then
-                _ca_opts="$_ca_opts,$_ca_k=$_ca_v"
-            else
-                _ca_opts="$_ca_k=$_ca_v"
-            fi
-        done <<EOF
-$(split_opts "$_ca_arg")
-EOF
-    done
+    _ca_kvs=$(opts_from_args add "$@") || exit $?
+    _ca_opts=$(printf '%s\n' "$_ca_kvs" | opts_join)
 
     if ! git -C "$_ca_abs" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        warn "$_ca_abs is not a git working tree (yet) — adding anyway"
+        warn "$_ca_abs is not a git working tree (yet): adding anyway"
     fi
 
     ensure_targets_file
@@ -1138,34 +1347,54 @@ EOF
 
 cmd_remove() {
     _cr_name=${1:-}
-    [ -n "$_cr_name" ] || die 3 "usage: syncto --remove NAME"
+    [ -n "$_cr_name" ] || die 3 "usage: syncto remove NAME"
     [ -f "$TARGETS_FILE" ] || die 3 "no such target: $_cr_name"
 
     targets_load
     tg_index_of "$_cr_name" >/dev/null || die 3 "no such target: $_cr_name"
 
-    _cr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
-    while IFS= read -r _cr_line || [ -n "$_cr_line" ]; do
-        _cr_first=${_cr_line%%"$TAB"*}
-        if [ "$_cr_first" = "$_cr_name" ] && [ "$_cr_first" != "$_cr_line" ]; then
-            continue
-        fi
-        printf '%s\n' "$_cr_line" >>"$_cr_tmp"
-    done <"$TARGETS_FILE"
-    cat "$_cr_tmp" >"$TARGETS_FILE" || { rm -f "$_cr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
-    rm -f "$_cr_tmp"
+    targets_rewrite "$_cr_name" ""
     printf 'Removed %s\n' "$_cr_name"
     log info "$_cr_name" "removed target"
     rm -f "$LAST_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
     rm -f "$OK_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
+    rm -f "$OUTCOME_DIR/$(safe_name "$_cr_name")" 2>/dev/null || :
     return 0
 }
 
 cmd_edit() {
-    ensure_targets_file
-    _ce_ed=${EDITOR:-${VISUAL:-vi}}
-    # $EDITOR may carry flags, so let the shell split it, but keep the path quoted.
-    sh -c "$_ce_ed \"\$1\"" sh "$TARGETS_FILE"
+    if [ "$#" -eq 0 ]; then
+        ensure_targets_file
+        _ce_ed=${EDITOR:-${VISUAL:-vi}}
+        # $EDITOR may carry flags, so let the shell split it, but keep the path quoted.
+        sh -c "$_ce_ed \"\$1\"" sh "$TARGETS_FILE"
+        return
+    fi
+    _ce_name=$1
+    shift
+    [ "$#" -gt 0 ] || die 3 "usage: syncto edit NAME key=value ...  (plain 'syncto edit' opens the file)"
+    targets_load
+    _ce_i=$(tg_index_of "$_ce_name") || die 3 "no such target: $_ce_name"
+    _ce_new=$(opts_from_args edit "$@") || exit $?
+    _ce_cur=$(split_opts "$(tg_opts "$_ce_i")")
+    while IFS= read -r _ce_kv; do
+        [ -n "$_ce_kv" ] || continue
+        _ce_cur=$(printf '%s\n' "$_ce_cur" | grep -v "^${_ce_kv%%=*}=" || :)
+        if [ -n "${_ce_kv#*=}" ]; then
+            _ce_cur=$(printf '%s\n%s' "$_ce_cur" "$_ce_kv")
+        fi
+    done <<EOF
+$_ce_new
+EOF
+    _ce_opts=$(printf '%s\n' "$_ce_cur" | opts_join)
+    targets_rewrite "$_ce_name" \
+        "$(printf '%s\t%s\t%s' "$_ce_name" "$(path_encode "$(tg_path "$_ce_i")")" "$_ce_opts")"
+    printf 'Updated %s: %s\n' "$_ce_name" "${_ce_opts:-all defaults}"
+    log info "$_ce_name" "edited target [$_ce_opts]"
+    case "$_ce_new" in
+        *watch=*|*remote_poll=*) printf "Run 'syncto start' so background syncing picks up the change.\n" ;;
+    esac
+    return 0
 }
 
 cmd_log() {
@@ -1276,7 +1505,7 @@ cmd_watch() {
         if [ -n "${1:-}" ]; then
             die 3 "no such target: $1"
         fi
-        die 3 "no targets have watch=on or remote_poll; add one with 'syncto --add NAME PATH watch=on'"
+        die 3 "no targets have watch=on or remote_poll; add one with 'syncto add NAME PATH watch=on'"
     fi
 
     if [ "$P_COUNT" -gt 0 ]; then
@@ -1299,15 +1528,15 @@ cmd_watch() {
 
     if command -v fswatch >/dev/null 2>&1; then
         log info "" "watching ${W_COUNT} target(s) with fswatch"
-        printf 'syncto: watching %s target(s) with fswatch — ctrl-c to stop\n' "$W_COUNT" >&2
+        printf 'syncto: watching %s target(s) with fswatch, ctrl-c to stop\n' "$W_COUNT" >&2
         watch_loop_fswatch "$@"
     elif command -v inotifywait >/dev/null 2>&1; then
         log info "" "watching ${W_COUNT} target(s) with inotifywait"
-        printf 'syncto: watching %s target(s) with inotifywait — ctrl-c to stop\n' "$W_COUNT" >&2
+        printf 'syncto: watching %s target(s) with inotifywait, ctrl-c to stop\n' "$W_COUNT" >&2
         watch_loop_inotify "$@"
     else
         log info "" "watching ${W_COUNT} target(s) by polling"
-        printf 'syncto: no fswatch/inotifywait found — polling every %ss — ctrl-c to stop\n' "$W_DEBOUNCE" >&2
+        printf 'syncto: no fswatch or inotifywait found: polling every %ss, ctrl-c to stop\n' "$W_DEBOUNCE" >&2
         watch_loop_poll
     fi
     return 0
@@ -1470,24 +1699,6 @@ sched_exec() {
     fi
 }
 
-# render_template FILE: fills @NAME@ placeholders; fails if any remain.
-# Installed copies use the inline units below, kept identical.
-render_template() {
-    [ -f "$1" ] || return 1
-    _rt_exec=$(sched_exec)
-    [ -x "$_rt_exec" ] || return 1
-    _rt=$(cat "$1") || return 1
-    _rt=${_rt//@EXEC@/$_rt_exec}
-    _rt=${_rt//@INTERVAL@/$G_INTERVAL}
-    _rt=${_rt//@LOG@/$LOG_FILE}
-    _rt=${_rt//@LABEL@/$SYNCTO_LABEL}
-    case "$_rt" in
-        *@[A-Z]*@*) return 1 ;;
-    esac
-    printf '%s\n' "$_rt"
-    return 0
-}
-
 # Print the ProgramArguments / ExecStart words, one per line.
 # macOS always goes through $SHELL_BIN: TCC grants (Full Disk Access) attach
 # to the binary launchd exec'd, and a script holds none.
@@ -1496,7 +1707,7 @@ sched_argv() {
     if [ ! -x "$_sa_exec" ] || [ "$(uname -s)" = "Darwin" ]; then
         printf '%s\n' "$SHELL_BIN"
     fi
-    printf '%s\n-d\n' "$_sa_exec"
+    printf '%s\nrun\n' "$_sa_exec"
 }
 
 plist_path() {
@@ -1511,31 +1722,29 @@ install_launchd() {
     _il_plist=$(plist_path)
     mkdir -p "$HOME/Library/LaunchAgents" || die 1 "cannot create $HOME/Library/LaunchAgents"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
-    if ! render_template "$SELF_DIR/templates/$SYNCTO_LABEL.plist.in" >"$_il_plist" 2>/dev/null; then
-        {
-            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
-            printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-            printf '%s\n' '<plist version="1.0">'
-            printf '%s\n' '<dict>'
-            printf '    <key>Label</key>\n    <string>%s</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
-            printf '    <key>ProgramArguments</key>\n    <array>\n'
-            sched_argv | while IFS= read -r _il_a; do
-                printf '        <string>%s</string>\n' "$(xml_escape "$_il_a")"
-            done
-            printf '    </array>\n'
-            printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
-            printf '        <key>PATH</key>\n        <string>%s</string>\n' \
-                '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
-            printf '    </dict>\n'
-            printf '    <key>StartInterval</key>\n    <integer>%s</integer>\n' "$G_INTERVAL"
-            printf '    <key>RunAtLoad</key>\n    <true/>\n'
-            printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
-            printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-            printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-            printf '%s\n' '</dict>'
-            printf '%s\n' '</plist>'
-        } >"$_il_plist" || die 1 "cannot write $_il_plist"
-    fi
+    {
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+        printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+        printf '%s\n' '<plist version="1.0">'
+        printf '%s\n' '<dict>'
+        printf '    <key>Label</key>\n    <string>%s</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
+        printf '    <key>ProgramArguments</key>\n    <array>\n'
+        sched_argv | while IFS= read -r _il_a; do
+            printf '        <string>%s</string>\n' "$(xml_escape "$_il_a")"
+        done
+        printf '    </array>\n'
+        printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
+        printf '        <key>PATH</key>\n        <string>%s</string>\n' \
+            '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
+        printf '    </dict>\n'
+        printf '    <key>StartInterval</key>\n    <integer>%s</integer>\n' "$G_INTERVAL"
+        printf '    <key>RunAtLoad</key>\n    <true/>\n'
+        printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
+        printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+        printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+        printf '%s\n' '</dict>'
+        printf '%s\n' '</plist>'
+    } >"$_il_plist" || die 1 "cannot write $_il_plist"
 
     _il_uid=$(id -u)
     launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL" >/dev/null 2>&1 || :
@@ -1551,32 +1760,29 @@ install_launchd() {
 
     _il_wplist=$(watch_plist_path)
     if any_watch_target; then
-        if ! render_template "$SELF_DIR/templates/$SYNCTO_LABEL-watch.plist.in" \
-                >"$_il_wplist" 2>/dev/null; then
-            {
-                printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
-                printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
-                printf '%s\n' '<plist version="1.0">'
-                printf '%s\n' '<dict>'
-                printf '    <key>Label</key>\n    <string>%s-watch</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
-                printf '    <key>ProgramArguments</key>\n    <array>\n'
-                printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
-                printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
-                printf '        <string>-w</string>\n'
-                printf '    </array>\n'
-                printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
-                printf '        <key>PATH</key>\n        <string>%s</string>\n' \
-                    '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
-                printf '    </dict>\n'
-                printf '    <key>RunAtLoad</key>\n    <true/>\n'
-                printf '    <key>KeepAlive</key>\n    <true/>\n'
-                printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
-                printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-                printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
-                printf '%s\n' '</dict>'
-                printf '%s\n' '</plist>'
-            } >"$_il_wplist" || die 1 "cannot write $_il_wplist"
-        fi
+        {
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+            printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+            printf '%s\n' '<plist version="1.0">'
+            printf '%s\n' '<dict>'
+            printf '    <key>Label</key>\n    <string>%s-watch</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
+            printf '    <key>ProgramArguments</key>\n    <array>\n'
+            printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
+            printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
+            printf '        <string>watch</string>\n'
+            printf '    </array>\n'
+            printf '    <key>EnvironmentVariables</key>\n    <dict>\n'
+            printf '        <key>PATH</key>\n        <string>%s</string>\n' \
+                '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin'
+            printf '    </dict>\n'
+            printf '    <key>RunAtLoad</key>\n    <true/>\n'
+            printf '    <key>KeepAlive</key>\n    <true/>\n'
+            printf '    <key>ProcessType</key>\n    <string>Background</string>\n'
+            printf '    <key>StandardOutPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+            printf '    <key>StandardErrorPath</key>\n    <string>%s</string>\n' "$(xml_escape "$LOG_FILE")"
+            printf '%s\n' '</dict>'
+            printf '%s\n' '</plist>'
+        } >"$_il_wplist" || die 1 "cannot write $_il_wplist"
         launchctl bootout "gui/$_il_uid/$SYNCTO_LABEL-watch" >/dev/null 2>&1 || :
         if ! launchctl bootstrap "gui/$_il_uid" "$_il_wplist" >/dev/null 2>&1; then
             launchctl unload "$_il_wplist" >/dev/null 2>&1 || :
@@ -1641,14 +1847,13 @@ install_systemd() {
     mkdir -p "$_is_dir" || die 1 "cannot create $_is_dir"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
 
-    if ! render_template "$SELF_DIR/templates/syncto.service.in" >"$_is_dir/syncto.service" 2>/dev/null; then
-        _is_argv=""
-        while IFS= read -r _is_a; do
-            _is_argv="$_is_argv \"$_is_a\""
-        done <<EOF
+    _is_argv=""
+    while IFS= read -r _is_a; do
+        _is_argv="$_is_argv \"$_is_a\""
+    done <<EOF
 $(sched_argv)
 EOF
-        cat >"$_is_dir/syncto.service" <<EOF || die 1 "cannot write $_is_dir/syncto.service"
+    cat >"$_is_dir/syncto.service" <<EOF || die 1 "cannot write $_is_dir/syncto.service"
 [Unit]
 Description=syncto scheduled sync pass
 After=network-online.target
@@ -1658,10 +1863,8 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=${_is_argv# }
 EOF
-    fi
 
-    if ! render_template "$SELF_DIR/templates/syncto.timer.in" >"$_is_dir/syncto.timer" 2>/dev/null; then
-        cat >"$_is_dir/syncto.timer" <<EOF || die 1 "cannot write $_is_dir/syncto.timer"
+    cat >"$_is_dir/syncto.timer" <<EOF || die 1 "cannot write $_is_dir/syncto.timer"
 [Unit]
 Description=syncto scheduled sync timer
 
@@ -1674,14 +1877,11 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-    fi
 
     _is_watch=0
     if any_watch_target; then
         _is_watch=1
-        if ! render_template "$SELF_DIR/templates/syncto-watch.service.in" \
-                >"$_is_dir/syncto-watch.service" 2>/dev/null; then
-            cat >"$_is_dir/syncto-watch.service" <<EOF || die 1 "cannot write $_is_dir/syncto-watch.service"
+        cat >"$_is_dir/syncto-watch.service" <<EOF || die 1 "cannot write $_is_dir/syncto-watch.service"
 [Unit]
 Description=syncto filesystem watch daemon
 After=network-online.target
@@ -1689,14 +1889,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$(sched_exec) -w
+ExecStart=$(sched_exec) watch
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=default.target
 EOF
-        fi
     fi
 
     systemctl --user daemon-reload >/dev/null 2>&1 || :
@@ -1747,15 +1946,15 @@ uninstall_systemd() {
     return 0
 }
 
-cmd_install_service() {
+cmd_start() {
     case "$(uname -s)" in
         Darwin) install_launchd ;;
         Linux) install_systemd ;;
-        *) die 1 "no scheduler support for $(uname -s); run 'syncto --daemon' from cron" ;;
+        *) die 1 "no scheduler support for $(uname -s); run 'syncto run' from cron" ;;
     esac
 }
 
-cmd_uninstall_service() {
+cmd_stop() {
     case "$(uname -s)" in
         Darwin) uninstall_launchd ;;
         Linux) uninstall_systemd ;;
@@ -1769,29 +1968,30 @@ cmd_uninstall_service() {
 
 usage() {
     cat <<EOF
-syncto $SYNCTO_VERSION — unattended git sync for working copies you care about
+syncto $SYNCTO_VERSION: keeps git repos in sync by itself (commit, pull, push)
 
 USAGE
-  syncto [-v] [ACTION]
+  syncto [-v] [COMMAND]
 
-ACTIONS
-  (no action)                   list every target with its status
-  -s, --sync [NAME]             sync now — all targets, or just NAME
-  -a, --add NAME PATH [K=V...]  add a target
-  -r, --remove NAME             remove a target
-  -e, --edit                    open the targets file in \$EDITOR
-  -w, --watch [NAME]            foreground watch + remote poll loop (NAME, else every watch=on/remote_poll target)
-  -d, --daemon                  run one scheduled pass — what launchd/systemd calls
-  -i, --install-service         install the launchd agent or systemd user timer
-  -u, --uninstall-service       remove it again
-  -L, --log                     show the tail of the log
-  -v, --verbose                 also echo log lines to stderr (use with any action)
-  -h, --help                    this text
-  -V, --version                 print the version
+COMMANDS
+  status                    how every sync is doing (also: plain 'syncto')
+  add NAME PATH [K=V ...]   start syncing a repo
+  edit NAME K=V ...         change a sync's options; K= resets one to its default
+  edit                      open the targets file in \$EDITOR
+  remove NAME               stop syncing a repo; its files stay
+  sync [NAME]               sync now: every repo, or just NAME
+  log                       recent activity
+  start                     sync in the background (launchd or systemd)
+  stop                      stop syncing in the background
+  run                       one scheduled pass; what 'start' schedules
+  watch [NAME]              the watch loop; what 'start' runs when a repo has watch=on
+  help, version
+
+  -v, --verbose             also print log lines (works with any command)
 
 TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   interval=SECONDS      minimum seconds between scheduled syncs   [$G_INTERVAL]
-  watch=on|off          include in a bare 'syncto --watch'       [$G_WATCH]
+  watch=on|off          sync within seconds of a file changing    [$G_WATCH]
   mode=sync|push|pull   commit+pull+push / commit+push / pull only [$G_MODE]
   branch=NAME           branch to pull and push                   [$G_BRANCH]
   remote=NAME           remote to pull and push                   [$G_REMOTE]
@@ -1812,7 +2012,7 @@ FILES
   $(path_encode "$CONFIG_FILE")
       global defaults, one key=value per line: any target option, plus
       log=PATH             where to write the log
-      key=PATH             ssh key for git — launchd and systemd have no
+      key=PATH             ssh key for git: launchd and systemd have no
                            ssh-agent, so name the key instead of relying on one
       GIT_SSH_COMMAND=CMD  a full ssh command; wins over key= (alias: ssh=)
 
@@ -1823,15 +2023,15 @@ FILES
 EXIT CODES
   0  ok
   1  error
-  2  conflict — a human has to look at it
+  2  conflict: a human has to look at it
   3  configuration error
   4  another run holds the lock
 
 EXAMPLES
-  syncto --add notes "\$HOME/notes" interval=300,watch=on,prefix=notes
-  syncto --add site "\$HOME/site" mode=pull,branch=trunk
-  syncto --sync notes
-  syncto --install-service
+  syncto add notes ~/notes watch=on,prefix=notes
+  syncto add site ~/site mode=pull,branch=trunk
+  syncto start
+  syncto sync notes
 EOF
 }
 
@@ -1888,52 +2088,36 @@ main() {
     fi
 
     case "$action" in
-        "")
-            cmd_list
-            ;;
-        -s|--sync)
-            cmd_sync "${1:-}"
-            ;;
-        -a|--add)
-            cmd_add "$@"
-            ;;
-        -r|--remove)
-            cmd_remove "${1:-}"
-            ;;
-        -e|--edit)
-            cmd_edit
-            ;;
-        -w|--watch)
+        ""|status) cmd_status ;;
+        add) cmd_add "$@" ;;
+        edit) cmd_edit "$@" ;;
+        remove) cmd_remove "${1:-}" ;;
+        sync) cmd_sync "${1:-}" ;;
+        log) cmd_log ;;
+        start) cmd_start ;;
+        stop) cmd_stop ;;
+        watch)
             DAEMON=1
             cmd_watch "${1:-}"
             ;;
-        -d|--daemon)
+        run)
             DAEMON=1
-            cmd_daemon
+            cmd_run
             ;;
-        -i|--install-service)
-            cmd_install_service
-            ;;
-        -u|--uninstall-service)
-            cmd_uninstall_service
-            ;;
-        -L|--log)
-            cmd_log
-            ;;
-        -h|--help)
-            usage
-            ;;
-        -V|--version)
-            printf 'syncto %s\n' "$SYNCTO_VERSION"
+        help|-h|--help) usage ;;
+        version|-V|--version) printf 'syncto %s\n' "$SYNCTO_VERSION" ;;
+        -s|--sync|-a|--add|-r|--remove|-e|--edit|-w|--watch|-d|--daemon|\
+        -i|--install-service|-u|--uninstall-service|-L|--log)
+            die 1 "'$action' was replaced by commands (see 'syncto help'); if launchd or systemd runs this, update it with 'syncto start'"
             ;;
         -*)
             warn "unknown option: $action"
-            printf "Try 'syncto --help'.\n" >&2
+            printf "Try 'syncto help'.\n" >&2
             return 1
             ;;
         *)
-            warn "unknown action: $action"
-            printf "Try 'syncto --help'.\n" >&2
+            warn "unknown command: $action"
+            printf "Try 'syncto help'.\n" >&2
             return 1
             ;;
     esac

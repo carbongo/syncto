@@ -1,46 +1,34 @@
-# syncto — agent entry point
+# syncto
 
-Unattended git auto-sync for one or more local repos: add, commit, rebase-pull, push,
-on an interval or a filesystem watch, per-target configurable. Pure shell, no build step.
+Unattended git auto-sync: commit, rebase-pull and push on a timer or on file change.
+One bash script, no build step. Public repo: changes go through PRs.
 
-Sync is event-driven when configured for it: `watch=on` installs a resident watch daemon
-that pushes local edits within a debounce window, and `peer=` lets the pushing machine
-wake its counterpart so the inbound direction is prompt too; `remote_poll=` has the
-watch daemon catch pushes from anywhere else via `git ls-remote`. The interval unit stays on
-underneath as a backstop.
+## Start
 
-Facts:
-- Everything lives in `syncto.sh` (bash 3.2 + bash 5 compatible — no associative arrays,
-  no `${var^^}`, no `mapfile`, no `declare -A`; runs on macOS stock bash and Linux bash).
-- Install layout: script → `~/.local/share/syncto/syncto.sh`, entry point symlink/shim
-  → `~/.local/bin/syncto` (on `$PATH`).
-- Targets config: `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/targets` — TSV,
-  `name<TAB>path<TAB>options`, `$HOME` stored as `~`. Global config:
-  `${XDG_CONFIG_HOME:-$HOME/.config}/syncto/config` — `key=value` lines.
-- CLI is flags, not subcommands (mirrors `cdto`): bare `syncto` lists targets;
-  `-s/--sync`, `-a/--add`, `-r/--remove`, `-e/--edit`, `-w/--watch`, `-d/--daemon`,
-  `-i/--install-service`, `-u/--uninstall-service`, `-L/--log`, `-v/--verbose`,
-  `-h/--help`, `-V/--version`. See README for the full table.
-- Test: `./test.sh` (runs the suite under bash; project targets bash 3.2 semantics even
-  when tested under a newer bash). The watch tests stub both `fswatch` and `inotifywait`
-  on `PATH` to replay a fixed event list, so they exercise the real watcher code path
-  without needing either installed — and without the real watcher hanging the suite.
-- Unit templates in `templates/`: `syncto.{service,timer}.in` + `com.user.syncto.plist.in`
-  for the interval unit, `syncto-watch.service.in` + `com.user.syncto-watch.plist.in` for
-  the resident watch daemon (installed only when some target has `watch=on`).
-- Install: `./install.sh` (POSIX `sh`, idempotent) or the curl one-liner in the README.
-- No ssh-agent under schedulers (launchd/systemd have none): use the `key=` /
-  `GIT_SSH_COMMAND` escape hatch in the target's options, not an agent-dependent setup.
-- Exit codes: `0` ok, `1` error, `2` conflict needing a human, `3` config error,
-  `4` lock held.
-- Quiet skips (guard non-zero, dirty tree, deferred pull) stay silent by design; the
-  `stale=` alarm is the only thing that notices when one stops being transient. State:
-  `~/.local/state/syncto/last` (pass attempted) vs `lastok` (pass succeeded).
+| Task | Command |
+|---|---|
+| run from source | `./syncto.sh <command>` |
+| install | `./install.sh` (script to `~/.local/share/syncto/`, entry point `~/.local/bin/syncto`) |
+| test | `./test.sh`, and `/bin/bash ./test.sh` for bash 3.2 |
+| lint | `shellcheck -S warning syncto.sh install.sh uninstall.sh test.sh` |
 
-docs/ map:
-- `docs/design.md` — why this tool exists, the sync algorithm step by step, the locking
-  scheme, why a rebase never runs into a dirty tree (an editor's caret is the thing being
-  protected), the conflict policy (abort + notify, never auto-resolve), the staleness alarm, the event-driven
-  model (watch out / peer in) and why the interval survives as a backstop, why bash 3.2,
-  the watcher fallback chain including why `.git` must be excluded from it, log
-  rotation, and the security posture.
+CI (`.github/workflows/ci.yml`) runs the lint, and the tests on macOS (bash 3.2) and Ubuntu.
+
+## Constraints
+
+- bash 3.2 and 5, BSD and GNU userland: no `declare -A`, `${v^^}`, `mapfile`,
+  `readlink -f`, `date -d`, `stat -c`, or `sed -i` without a suffix.
+- `main` runs as `main || rc=$?`, so `set -e` is off inside it: check `$(…)` failures.
+- Never auto-resolve a conflict; never rebase into a dirty tree (no `--autostash`).
+- launchd and systemd have no ssh-agent: targets use `key=` or `GIT_SSH_COMMAND`.
+- Comments: one line, only where the code alone would mislead.
+- Tests stub `fswatch` and `inotifywait`; a real watcher never exits and hangs the suite.
+
+## Docs
+
+- `docs/cli.md`: commands, exit codes, status words
+- `docs/options.md`: options and defaults, config files, hook environment
+- `docs/scheduling.md`: start/stop units, ssh keys, macOS Full Disk Access
+- `docs/watch.md`: watch mode, watchers, peer wake, remote poll
+- `docs/sync.md`: one pass step by step, failure handling, rules that must not change
+- `docs/security.md`: what gets committed, where config and keys live

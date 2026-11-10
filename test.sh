@@ -95,7 +95,7 @@ test_config_roundtrip() {
     mkdir -p "$_t_target"
     git_q "$_t_target" init
 
-    run_syncto "$_t_sb" --add proj "$_t_target" "interval=60,watch=on,prefix=proj"
+    run_syncto "$_t_sb" add proj "$_t_target" "interval=60,watch=on,prefix=proj"
     assert_status "add: exit 0" 0 "$RC" "$OUT"
 
     _targets_file="$_t_sb/home/.config/syncto/targets"
@@ -125,12 +125,12 @@ $(cat "$_targets_file" 2>/dev/null)"
         *) fail "list: shows added target" "$OUT" ;;
     esac
     case "$OUT" in
-        *60s*) ok "list: shows interval option" ;;
-        *) fail "list: shows interval option" "$OUT" ;;
+        *"not synced yet"*"on save"*) ok "status: a new watched target is not synced yet, on save" ;;
+        *) fail "status: a new watched target is not synced yet, on save" "$OUT" ;;
     esac
     case "$OUT" in
-        *proj*sync*on*) ok "list: shows watch=on" ;;
-        *) ok "list: watch column present (loose check)" ;; # format not guaranteed word-for-word
+        *"Background: off"*"syncto start"*) ok "status: says background is off and how to start it" ;;
+        *) fail "status: says background is off and how to start it" "$OUT" ;;
     esac
 
     # options survive a full round trip via --remove/--add cycle: read back the
@@ -149,7 +149,7 @@ $(cat "$_targets_file" 2>/dev/null)"
         *) fail "options survive: prefix=proj present" "$_opts_line" ;;
     esac
 
-    run_syncto "$_t_sb" --remove proj
+    run_syncto "$_t_sb" remove proj
     assert_status "remove: exit 0" 0 "$RC" "$OUT"
 
     if grep -Fq "$(printf 'proj\t')" "$_targets_file" 2>/dev/null; then
@@ -158,7 +158,7 @@ $(cat "$_targets_file" 2>/dev/null)"
         ok "remove: target gone from targets file"
     fi
 
-    run_syncto "$_t_sb"
+    run_syncto "$_t_sb" status
     case "$OUT" in
         *"No targets"*) ok "list: empty after remove" ;;
         *) fail "list: empty after remove" "$OUT" ;;
@@ -191,13 +191,18 @@ test_sync_basic() {
     git_q "$_t_work" commit --allow-empty -m init
     git_q "$_t_work" push origin main
 
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t"
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,remote=origin,prefix=t"
     assert_status "sync-basic: add exit 0" 0 "$RC" "$OUT"
 
     # new file committed and pushed
     printf 'hello\n' >"$_t_work/newfile.txt"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "sync-basic: sync of new file exits 0" 0 "$RC" "$OUT"
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"✓ synced just now"*) ok "status: a synced target says synced just now" ;;
+        *) fail "status: a synced target says synced just now" "$OUT" ;;
+    esac
 
     _last_msg=$(git -C "$_t_work" log -1 --pretty=%s)
     case "$_last_msg" in
@@ -211,7 +216,7 @@ test_sync_basic() {
 
     # no-op run when nothing changed
     _head_before=$(git -C "$_t_work" rev-parse HEAD)
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "sync-basic: no-op run exits 0" 0 "$RC" "$OUT"
     _head_after=$(git -C "$_t_work" rev-parse HEAD)
     assert_eq "sync-basic: no-op run makes no new commit" "$_head_before" "$_head_after"
@@ -226,7 +231,7 @@ test_sync_basic() {
     git_q "$_t_other" commit -m "other machine change"
     git_q "$_t_other" push origin main
 
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "sync-basic: pulling a remote change exits 0" 0 "$RC" "$OUT"
 
     if [ -f "$_t_work/other.txt" ]; then
@@ -273,10 +278,18 @@ test_conflict() {
     # so syncto's own commit step will produce a colliding commit on push/pull.
     printf 'line1-changed-locally\n' >"$_t_work/conflict.txt"
 
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t"
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,remote=origin,prefix=t"
 
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "conflict: sync exits 2" 2 "$RC" "$OUT"
+    _t_rc=$RC _t_out=$OUT
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"needs you"*"both sides changed conflict.txt"*"fix: "*"git rebase --continue"*)
+            ok "status: a conflict names the file and the fix" ;;
+        *) fail "status: a conflict names the file and the fix" "$OUT" ;;
+    esac
+    RC=$_t_rc OUT=$_t_out
 
     _gitdir="$_t_work/.git"
     if [ -d "$_gitdir/rebase-merge" ] || [ -d "$_gitdir/rebase-apply" ]; then
@@ -302,7 +315,7 @@ test_conflict() {
         *) fail "conflict: interactive run echoes the conflict to stderr" "$OUT" ;;
     esac
     rm -rf "$_t_sb/home/.local/state/syncto/last"   # make the target due again
-    run_syncto "$_t_sb" -d
+    run_syncto "$_t_sb" run
     assert_status "conflict: -d hits the conflict too" 2 "$RC" "$OUT"
     case "$OUT" in
         *"level=conflict"*) fail "conflict: -d does not echo to stderr" "$OUT" ;;
@@ -326,7 +339,7 @@ fake_ssh_target() {
     git_q "$_t_work" remote add origin "ssh://git@example.invalid/x.git"
     printf '#!/bin/sh\necho "%s" >&2\nexit 255\n' "$1" >"$_t_sb/fake-ssh"
     chmod +x "$_t_sb/fake-ssh"
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t,ssh=$_t_sb/fake-ssh,notify=touch $_t_sb/notified${2:-}"
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,remote=origin,prefix=t,ssh=$_t_sb/fake-ssh,notify=touch $_t_sb/notified${2:-}"
 }
 
 # assert_log NAME PATTERN [FORBIDDEN]: the sandbox log matches PATTERN and,
@@ -346,7 +359,7 @@ assert_log() {
 test_network_error_not_conflict() {
     # Fails the way GitHub's ssh-over-443 does when it drops us.
     fake_ssh_target "Connection reset by 140.82.121.36 port 443"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "network: dropped connection exits 0" 0 "$RC" "$OUT"
     if [ -e "$_t_sb/notified" ]; then
         fail "network: dropped connection does not notify" "notify hook ran"
@@ -359,11 +372,16 @@ test_network_error_not_conflict() {
         *"network unreachable"*) ok "network: logged as warn, not conflict" ;;
         *) fail "network: logged as warn, not conflict" "$_log" ;;
     esac
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"offline, retrying"*"Connection reset by"*) ok "status: offline with the reason" ;;
+        *) fail "status: offline with the reason" "$OUT" ;;
+    esac
 }
 
 test_closed_by_remote_host() {
     fake_ssh_target "Connection to example.invalid closed by remote host."
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "network: closed by remote host exits 0" 0 "$RC" "$OUT"
     assert_log "network: closed by remote host logged as warn, not conflict" \
         '*network unreachable*' '*level=conflict*'
@@ -371,7 +389,7 @@ test_closed_by_remote_host() {
 
 test_push_network_error() {
     fake_ssh_target "ssh: connect to host example.invalid port 443: Operation timed out" ",mode=push"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "network: push timeout exits 0" 0 "$RC" "$OUT"
     assert_log "network: push timeout logged as warn, not error" \
         '*network unreachable*' '*level=error*'
@@ -381,7 +399,7 @@ test_push_network_error() {
 
 test_auth_error_not_conflict() {
     fake_ssh_target "git@example.invalid: Permission denied (publickey)."
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "auth: refused key exits 1" 1 "$RC" "$OUT"
     if [ -e "$_t_sb/notified" ]; then
         fail "auth: refused key does not notify" "notify hook ran"
@@ -390,13 +408,18 @@ test_auth_error_not_conflict() {
     fi
     assert_log "auth: logged as error, not conflict" \
         '*level=error*authentication refused*' '*level=conflict*'
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"failing"*"refused the credentials"*"fix: "*) ok "status: refused credentials say so" ;;
+        *) fail "status: refused credentials say so" "$OUT" ;;
+    esac
 }
 
 test_add_failure_logged() {
     fake_ssh_target "unused"
     printf 'x\n' >"$_t_work/new.txt"
     : >"$_t_work/.git/index.lock"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "add: failing git add exits 1" 1 "$RC" "$OUT"
     assert_log "add: git's own error is logged" '*git add -A failed: *index.lock*'
 }
@@ -416,13 +439,13 @@ test_locking() {
     git_q "$_t_work" config user.name Test
     git_q "$_t_work" commit --allow-empty -m init
 
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,mode=push,interval=60"
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,mode=push,interval=60"
 
     _lock_dir="$_t_sb/home/.local/state/syncto/locks/work.lock"
     mkdir -p "$_lock_dir"
     printf '999999 %s\n' "$(date +%s)" >"$_lock_dir/owner"
 
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "locking: held lock makes sync exit 4" 4 "$RC" "$OUT"
 
     rm -rf "$_lock_dir"
@@ -443,12 +466,12 @@ test_guard() {
     git_q "$_t_work" config user.name Test
     git_q "$_t_work" commit --allow-empty -m init
 
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,mode=push,guard=exit 7"
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,mode=push,guard=exit 7"
 
     printf 'x\n' >"$_t_work/f.txt"
     _head_before=$(git -C "$_t_work" rev-parse HEAD)
 
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "guard: skip still exits 0" 0 "$RC" "$OUT"
 
     _head_after=$(git -C "$_t_work" rev-parse HEAD)
@@ -473,13 +496,13 @@ test_stale_alarm() {
     git_q "$_t_work" config user.name Test
     git_q "$_t_work" commit --allow-empty -m init
 
-    run_syncto "$_t_sb" --add work "$_t_work" \
+    run_syncto "$_t_sb" add work "$_t_work" \
         "branch=main,mode=push,stale=600,guard=exit 7,notify=printf '%s' \"\$SYNCTO_MESSAGE\" >>$_t_alert"
 
     _ok_file="$_t_sb/home/.local/state/syncto/lastok/work"
 
     # First pass seeds the clock instead of alerting on a brand-new target.
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     if [ -f "$_t_alert" ]; then
         fail "stale: a never-synced target does not alert on its first pass" "$(cat "$_t_alert")"
     else
@@ -493,7 +516,7 @@ test_stale_alarm() {
 
     # Age the clock past the limit: the guard is still failing, so nothing synced.
     printf '%s\n' "$(( $(date +%s) - 4000 ))" >"$_ok_file"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "stale: an alerting pass still exits 0" 0 "$RC" "$OUT"
     case "$(cat "$_t_alert" 2>/dev/null)" in
         *"has not synced"*) ok "stale: a stuck guard fires the notify hook" ;;
@@ -502,15 +525,15 @@ test_stale_alarm() {
 
     # Throttled: the same alert does not go out on every following pass.
     _t_size=$(wc -c <"$_t_alert")
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_eq "stale: the alert is throttled, not repeated every pass" \
         "$_t_size" "$(wc -c <"$_t_alert")"
 
     # A working target never alerts: drop the guard, sync, clock resets.
-    run_syncto "$_t_sb" --remove work
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,mode=push,stale=600"
+    run_syncto "$_t_sb" remove work
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,mode=push,stale=600"
     printf 'x\n' >"$_t_work/f.txt"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     _t_now=$(date +%s)
     _t_last=$(cat "$_ok_file" 2>/dev/null || printf '0')
     if [ "$((_t_now - _t_last))" -lt 60 ]; then
@@ -532,11 +555,11 @@ test_stale_off() {
     git_q "$_t_work" config user.name Test
     git_q "$_t_work" commit --allow-empty -m init
 
-    run_syncto "$_t_sb" --add work "$_t_work" \
+    run_syncto "$_t_sb" add work "$_t_work" \
         "branch=main,mode=push,stale=off,guard=exit 7,notify=printf '%s' \"\$SYNCTO_MESSAGE\" >>$_t_alert"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     printf '%s\n' "0" >"$_t_sb/home/.local/state/syncto/lastok/work" 2>/dev/null || :
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     if [ -f "$_t_alert" ]; then
         fail "stale: stale=off never alerts" "$(cat "$_t_alert")"
     else
@@ -545,7 +568,7 @@ test_stale_off() {
 }
 
 # ---------------------------------------------------------------------------
-# 6. --help / --version / unknown flag
+# 6. help / version / unknown input
 # ---------------------------------------------------------------------------
 
 test_help_version_unknown() {
@@ -573,8 +596,24 @@ test_help_version_unknown() {
         ok "unknown flag: exits non-zero"
     fi
     case "$OUT" in
-        *"syncto --help"*|*sage*) ok "unknown flag: prints a usage hint" ;;
+        *"syncto help"*) ok "unknown flag: prints a usage hint" ;;
         *) fail "unknown flag: prints a usage hint" "$OUT" ;;
+    esac
+
+    run_syncto "$_t_sb" help
+    assert_status "help command: exits 0" 0 "$RC" "$OUT"
+
+    run_syncto "$_t_sb" frobnicate
+    case "$RC:$OUT" in
+        0:*) fail "unknown command: exits non-zero" "exit 0" ;;
+        *"unknown command"*"syncto help"*) ok "unknown command: names it and points to help" ;;
+        *) fail "unknown command: names it and points to help" "$OUT" ;;
+    esac
+
+    run_syncto "$_t_sb" -d
+    case "$RC:$OUT" in
+        1:*"replaced by commands"*"syncto start"*) ok "old flag: exits 1 and says how to update the scheduler" ;;
+        *) fail "old flag: exits 1 and says how to update the scheduler" "$RC $OUT" ;;
     esac
 }
 
@@ -599,11 +638,11 @@ test_spaces() {
     git_q "$_t_work" commit --allow-empty -m init
     git_q "$_t_work" push origin main
 
-    run_syncto "$_t_sb" --add "spacey" "$_t_work" "branch=main,remote=origin,prefix=t"
+    run_syncto "$_t_sb" add "spacey" "$_t_work" "branch=main,remote=origin,prefix=t"
     assert_status "spaces: add exits 0" 0 "$RC" "$OUT"
 
     printf 'y\n' >"$_t_work/a file.txt"
-    run_syncto "$_t_sb" --sync spacey
+    run_syncto "$_t_sb" sync spacey
     assert_status "spaces: sync of a spacey path exits 0" 0 "$RC" "$OUT"
 
     _local_head=$(git -C "$_t_work" rev-parse main)
@@ -675,7 +714,7 @@ test_watch_ignores_git() {
     watch_fixture "$_t_sb" "$_t_sb/home/work/.git" "$_t_sb/home/work/.git/index" \
                            "$_t_sb/home/work/.git/refs/heads"
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+    run_syncto_path "$_t_sb" "$_t_sb/stub" add work "$_t_work" \
         "branch=main,remote=origin,prefix=t,watch=on,debounce=1"
 
     # A dirty file exists but was never announced by the watcher, so the only
@@ -683,7 +722,7 @@ test_watch_ignores_git() {
     printf 'untracked\n' >"$_t_work/note.md"
     _before=$(git -C "$_t_work" rev-list --count main)
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    run_syncto_path "$_t_sb" "$_t_sb/stub" watch work
     _after=$(git -C "$_t_work" rev-list --count main)
 
     assert_eq "watch: .git-only events trigger no sync" "$_before" "$_after" "$OUT"
@@ -696,13 +735,13 @@ test_watch_syncs_real_edit() {
     watch_fixture "$_t_sb" "$_t_sb/home/work/.git/index" "$_t_sb/home/work" \
                            "$_t_sb/home/work/.git/FETCH_HEAD"
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+    run_syncto_path "$_t_sb" "$_t_sb/stub" add work "$_t_work" \
         "branch=main,remote=origin,prefix=t,watch=on,debounce=1"
 
     printf 'real edit\n' >"$_t_work/note.md"
     _before=$(git -C "$_t_work" rev-list --count main)
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    run_syncto_path "$_t_sb" "$_t_sb/stub" watch work
     _after=$(git -C "$_t_work" rev-list --count main)
 
     if [ "$_after" -gt "$_before" ]; then
@@ -725,14 +764,14 @@ test_watch_skips_ignored() {
     git_q "$_t_work" commit -m ignore
     git_q "$_t_work" push origin main
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+    run_syncto_path "$_t_sb" "$_t_sb/stub" add work "$_t_work" \
         "branch=main,remote=origin,prefix=t,watch=on,debounce=1"
 
     mkdir -p "$_t_work/scratch"
     printf 'noise\n' >"$_t_work/scratch/tmp.txt"
     _before=$(git -C "$_t_work" rev-list --count main)
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    run_syncto_path "$_t_sb" "$_t_sb/stub" watch work
     _after=$(git -C "$_t_work" rev-list --count main)
 
     assert_eq "watch: an ignored-only change makes no commit" "$_before" "$_after" "$OUT"
@@ -749,7 +788,7 @@ test_debounce_option() {
     mkdir -p "$_t_target"
     git_q "$_t_target" init
 
-    run_syncto "$_t_sb" --add proj "$_t_target" "debounce=5,watch=on"
+    run_syncto "$_t_sb" add proj "$_t_target" "debounce=5,watch=on"
     assert_status "debounce: a numeric value is accepted" 0 "$RC" "$OUT"
 
     _targets_file="$_t_sb/home/.config/syncto/targets"
@@ -758,7 +797,7 @@ test_debounce_option() {
         *) fail "debounce: round-trips into the targets file" "$(cat "$_targets_file" 2>/dev/null)" ;;
     esac
 
-    run_syncto "$_t_sb" --add bad "$_t_target" "debounce=soon"
+    run_syncto "$_t_sb" add bad "$_t_target" "debounce=soon"
     case "$OUT" in
         *"debounce must be"*) ok "debounce: a non-numeric value is rejected" ;;
         *) fail "debounce: a non-numeric value is rejected" "$OUT" ;;
@@ -784,7 +823,7 @@ test_dirty_tree_defers_pull() {
     git_q "$_t_work" commit -m init
     git_q "$_t_work" push origin main
 
-    run_syncto "$_t_sb" --add work "$_t_work" "branch=main,remote=origin,prefix=t,mode=pull"
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,remote=origin,prefix=t,mode=pull"
     assert_status "dirty-pull: add exit 0" 0 "$RC" "$OUT"
 
     # Another machine pushes something we would normally pull down.
@@ -800,7 +839,7 @@ test_dirty_tree_defers_pull() {
     # ...but we are mid-sentence in note.md.
     printf 'first line\nhalf-typed parag\n' >"$_t_work/note.md"
 
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "dirty-pull: a deferred pull is not an error" 0 "$RC" "$OUT"
 
     if [ -f "$_t_work/other.txt" ]; then
@@ -822,7 +861,7 @@ half-typed parag" "$_t_body"
     # Once the writing stops and the tree is clean, the pull goes through.
     git_q "$_t_work" add -A
     git_q "$_t_work" commit -m "done typing"
-    run_syncto "$_t_sb" --sync work
+    run_syncto "$_t_sb" sync work
     assert_status "dirty-pull: sync of a clean tree exits 0" 0 "$RC" "$OUT"
 
     if [ -f "$_t_work/other.txt" ]; then
@@ -844,12 +883,12 @@ test_remote_poll() {
     printf '#!/bin/sh\nsleep 4\nexit 0\n' >"$_t_sb/stub/fswatch"
     cp "$_t_sb/stub/fswatch" "$_t_sb/stub/inotifywait"
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --add work "$_t_work" \
+    run_syncto_path "$_t_sb" "$_t_sb/stub" add work "$_t_work" \
         "branch=main,remote=origin,prefix=t,watch=on,remote_poll=1"
     assert_status "remote_poll: a numeric value is accepted" 0 "$RC" "$OUT"
 
     _t_log="$_t_sb/home/.local/state/syncto/syncto.log"
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    run_syncto_path "$_t_sb" "$_t_sb/stub" watch work
     if grep -q 'remote_poll:' "$_t_log" 2>/dev/null; then
         fail "remote_poll: an unchanged remote triggers no sync" "$(cat "$_t_log")"
     else
@@ -863,7 +902,7 @@ test_remote_poll() {
     git_q "$_t_other" commit -m "other machine change"
     git_q "$_t_other" push origin main
 
-    run_syncto_path "$_t_sb" "$_t_sb/stub" --watch work
+    run_syncto_path "$_t_sb" "$_t_sb/stub" watch work
     if [ -f "$_t_work/other.txt" ]; then
         ok "remote_poll: a remote push is pulled without any local event"
     else
@@ -871,7 +910,7 @@ test_remote_poll() {
 $(cat "$_t_log" 2>/dev/null)"
     fi
 
-    run_syncto "$_t_sb" --add bad "$_t_work" "remote_poll=soon"
+    run_syncto "$_t_sb" add bad "$_t_work" "remote_poll=soon"
     case "$RC" in
         0) fail "remote_poll: a non-numeric value is rejected" "$OUT" ;;
         *) ok "remote_poll: a non-numeric value is rejected" ;;
@@ -879,10 +918,49 @@ $(cat "$_t_log" 2>/dev/null)"
 }
 
 # ---------------------------------------------------------------------------
+# edit NAME key=value
+# ---------------------------------------------------------------------------
+
+test_edit_options() {
+    _t_sb=$(new_sandbox)
+    _t_target="$_t_sb/home/proj"
+    mkdir -p "$_t_target"
+    git_q "$_t_target" init
+    _t_file="$_t_sb/home/.config/syncto/targets"
+    run_syncto "$_t_sb" add proj "$_t_target" "interval=60,prefix=p"
+
+    run_syncto "$_t_sb" edit proj watch=on "notify=echo a\,b"
+    assert_status "edit: exits 0" 0 "$RC" "$OUT"
+    _t_line=$(grep -F "$(printf 'proj\t')" "$_t_file")
+    case "$_t_line" in
+        *interval=60*prefix=p*watch=on*'notify=echo a\,b'*) ok "edit: merges new options, keeps the rest, escapes commas" ;;
+        *) fail "edit: merges new options, keeps the rest, escapes commas" "$_t_line" ;;
+    esac
+    case "$OUT" in
+        *"syncto start"*) ok "edit: a watch change says to run syncto start" ;;
+        *) fail "edit: a watch change says to run syncto start" "$OUT" ;;
+    esac
+
+    run_syncto "$_t_sb" edit proj interval=
+    _t_line=$(grep -F "$(printf 'proj\t')" "$_t_file")
+    case "$_t_line" in
+        *interval=*) fail "edit: key= resets an option" "$_t_line" ;;
+        *prefix=p*) ok "edit: key= resets an option" ;;
+        *) fail "edit: key= resets an option" "$_t_line" ;;
+    esac
+
+    run_syncto "$_t_sb" edit proj colour=blue
+    assert_status "edit: an unknown option exits 3" 3 "$RC" "$OUT"
+    run_syncto "$_t_sb" edit nope watch=on
+    assert_status "edit: an unknown target exits 3" 3 "$RC" "$OUT"
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
 test_config_roundtrip
+test_edit_options
 test_sync_basic
 test_conflict
 test_network_error_not_conflict
