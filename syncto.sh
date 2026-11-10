@@ -1849,15 +1849,83 @@ sched_exec() {
     fi
 }
 
-# Print the ProgramArguments / ExecStart words, one per line.
-# macOS always goes through $SHELL_BIN: TCC grants (Full Disk Access) attach
-# to the binary launchd exec'd, and a script holds none.
-sched_argv() {
-    _sa_exec=$(sched_exec)
-    if [ ! -x "$_sa_exec" ] || [ "$(uname -s)" = "Darwin" ]; then
-        printf '%s\n' "$SHELL_BIN"
+# macOS privacy grants (Full Disk Access) attach to the program launchd starts.
+# Granting them to /bin/bash would hand them to every LaunchAgent, so syncto
+# builds this launcher once: it stays the started process and runs bash as its
+# child, so a grant can go to it alone.
+LAUNCHER="$HOME/.local/share/syncto/launcher"
+
+launcher_source() {
+    cat <<'EOF'
+#include <errno.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static pid_t child;
+
+static void pass_on(int sig) {
+    if (child > 0) kill(child, sig);
+}
+
+int main(int argc, char **argv) {
+    int status;
+    (void)argc;
+    signal(SIGTERM, pass_on);
+    signal(SIGINT, pass_on);
+    signal(SIGHUP, pass_on);
+    child = fork();
+    if (child < 0) return 1;
+    if (child == 0) {
+        argv[0] = "/bin/bash";
+        execv("/bin/bash", argv);
+        _exit(127);
+    }
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return 1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+}
+EOF
+}
+
+# launcher_build -> 0 if the launcher exists or was built. Needs the developer
+# tools already installed; never triggers Apple's install dialog.
+launcher_build() {
+    [ -x "$LAUNCHER" ] && return 0
+    xcode-select -p >/dev/null 2>&1 || return 1
+    command -v cc >/dev/null 2>&1 || return 1
+    mkdir -p "${LAUNCHER%/*}" || return 1
+    _lb_src=$(mktemp "${TMPDIR:-/tmp}/syncto-launcher.XXXXXX") || return 1
+    launcher_source >"$_lb_src"
+    if cc -x c -O2 -o "$LAUNCHER.tmp" "$_lb_src" >/dev/null 2>&1; then
+        codesign -s - -f -i local.syncto.launcher "$LAUNCHER.tmp" >/dev/null 2>&1 || :
+        mv -f "$LAUNCHER.tmp" "$LAUNCHER"
     fi
-    printf '%s\nrun\n' "$_sa_exec"
+    rm -f "$_lb_src" "$LAUNCHER.tmp"
+    [ -x "$LAUNCHER" ]
+}
+
+# sched_runner -> what launchd or systemd starts in front of the script: the
+# launcher (macOS), /bin/bash (macOS without developer tools, or a script that
+# is not executable), or nothing.
+sched_runner() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if launcher_build; then
+            printf '%s' "$LAUNCHER"
+        else
+            printf '%s' "$SHELL_BIN"
+        fi
+    elif [ ! -x "$(sched_exec)" ]; then
+        printf '%s' "$SHELL_BIN"
+    fi
+}
+
+# Print the ProgramArguments / ExecStart words, one per line.
+sched_argv() {
+    _sa_runner=$(sched_runner)
+    [ -n "$_sa_runner" ] && printf '%s\n' "$_sa_runner"
+    printf '%s\nrun\n' "$(sched_exec)"
 }
 
 plist_path() {
@@ -1917,7 +1985,7 @@ install_launchd() {
             printf '%s\n' '<dict>'
             printf '    <key>Label</key>\n    <string>%s-watch</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
             printf '    <key>ProgramArguments</key>\n    <array>\n'
-            printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
+            printf '        <string>%s</string>\n' "$(xml_escape "$(sched_runner)")"
             printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
             printf '        <string>watch</string>\n'
             printf '    </array>\n'

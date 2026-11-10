@@ -1149,6 +1149,18 @@ test_start_reloads() {
                     ok "start: reloads a running launchd watch agent" ;;
                 *) fail "start: reloads a running launchd watch agent" "$_t_calls" ;;
             esac
+            if xcode-select -p >/dev/null 2>&1; then
+                _t_args=$(plutil -extract ProgramArguments.0 raw -o - \
+                    "$_t_sb/home/Library/LaunchAgents/com.user.syncto.plist" 2>/dev/null)
+                case "$_t_args" in
+                    */.local/share/syncto/launcher) ok "start: launchd starts the launcher, not /bin/bash" ;;
+                    *) fail "start: launchd starts the launcher, not /bin/bash" "$_t_args" ;;
+                esac
+                case "$("$_t_args" "$SYNCTO" version 2>&1)" in
+                    "syncto "*) ok "start: the launcher runs syncto" ;;
+                    *) fail "start: the launcher runs syncto" "$("$_t_args" "$SYNCTO" version 2>&1)" ;;
+                esac
+            fi
             ;;
         *)
             case "$_t_calls" in
