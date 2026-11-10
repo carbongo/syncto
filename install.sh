@@ -6,7 +6,7 @@
 set -eu
 
 PROG_NAME="syncto"
-RAW_URL="https://raw.githubusercontent.com/carbongo/syncto/main"
+RELEASE_URL="https://github.com/carbongo/syncto/releases/latest/download"
 SHARE_DIR="$HOME/.local/share/$PROG_NAME"
 BIN_DIR="$HOME/.local/bin"
 BIN_PATH="$BIN_DIR/$PROG_NAME"
@@ -70,8 +70,8 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/syncto.sh" ]; then
   script_dir=$(mktemp -d) || exit 1
   trap 'rm -rf "$script_dir"' EXIT
   for f in syncto.sh config.example; do
-    curl -fsSL "$RAW_URL/$f" -o "$script_dir/$f" || {
-      echo "syncto: could not download $RAW_URL/$f" >&2
+    curl -fsSL "$RELEASE_URL/$f" -o "$script_dir/$f" || {
+      echo "syncto: could not download $RELEASE_URL/$f" >&2
       exit 1
     }
   done

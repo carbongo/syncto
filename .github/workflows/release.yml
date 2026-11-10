@@ -1,0 +1,23 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches SYNCTO_VERSION
+        run: |
+          v=$(sed -n 's/^SYNCTO_VERSION="\(.*\)"$/\1/p' syncto.sh)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag is $GITHUB_REF_NAME but syncto.sh says $v"; exit 1; }
+      - run: /bin/bash ./test.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" syncto.sh install.sh config.example --title "syncto $GITHUB_REF_NAME" --generate-notes
