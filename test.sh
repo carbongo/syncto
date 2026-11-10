@@ -1091,6 +1091,41 @@ test_dashboard() {
 }
 
 # ---------------------------------------------------------------------------
+# start reloads units that are already running
+# ---------------------------------------------------------------------------
+
+test_start_reloads() {
+    _t_sb=$(new_sandbox)
+    _t_target="$_t_sb/home/notes"
+    mkdir -p "$_t_target" "$_t_sb/stub"
+    git_q "$_t_target" init
+    for _t_b in launchctl systemctl; do
+        printf '#!/bin/sh\necho "%s $*" >>"%s/calls"\nexit 0\n' "$_t_b" "$_t_sb" >"$_t_sb/stub/$_t_b"
+        chmod +x "$_t_sb/stub/$_t_b"
+    done
+    run_syncto_path "$_t_sb" "$_t_sb/stub" add notes "$_t_target" watch=on
+    run_syncto_path "$_t_sb" "$_t_sb/stub" start
+    assert_status "start: exits 0" 0 "$RC" "$OUT"
+    _t_calls=$(cat "$_t_sb/calls" 2>/dev/null)
+    case "$(uname -s)" in
+        Darwin)
+            case "$_t_calls" in
+                *"bootout gui/"*"/com.user.syncto-watch"*"bootstrap gui/"*"com.user.syncto-watch.plist"*)
+                    ok "start: reloads a running launchd watch agent" ;;
+                *) fail "start: reloads a running launchd watch agent" "$_t_calls" ;;
+            esac
+            ;;
+        *)
+            case "$_t_calls" in
+                *"restart syncto.timer"*"restart syncto-watch.service"*)
+                    ok "start: restarts running systemd units" ;;
+                *) fail "start: restarts running systemd units" "$_t_calls" ;;
+            esac
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
@@ -1098,6 +1133,7 @@ test_config_roundtrip
 test_edit_options
 test_paused
 test_dashboard
+test_start_reloads
 test_sync_basic
 test_conflict
 test_network_error_not_conflict

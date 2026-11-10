@@ -4,7 +4,7 @@
 
 set -eu
 
-SYNCTO_VERSION="1.0.0"
+SYNCTO_VERSION="1.0.1"
 SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
@@ -1934,15 +1934,16 @@ EOF
     fi
 
     systemctl --user daemon-reload >/dev/null 2>&1 || :
-    systemctl --user enable --now syncto.timer >/dev/null 2>&1 ||
-        die 1 "wrote the units but 'systemctl --user enable --now syncto.timer' failed"
+    # restart, not just enable --now: a running unit must pick up new code and options.
+    { systemctl --user enable syncto.timer && systemctl --user restart syncto.timer; } >/dev/null 2>&1 ||
+        die 1 "wrote the units but could not enable and restart syncto.timer"
     printf 'Installed systemd user timer syncto.timer (every %ss)\n' "$G_INTERVAL"
     printf '  units: %s/syncto.{service,timer}\n' "$(path_encode "$_is_dir")"
     log info "" "installed systemd user timer interval=$G_INTERVAL"
 
     if [ "$_is_watch" -eq 1 ]; then
-        systemctl --user enable --now syncto-watch.service >/dev/null 2>&1 ||
-            die 1 "wrote the units but 'systemctl --user enable --now syncto-watch.service' failed"
+        { systemctl --user enable syncto-watch.service && systemctl --user restart syncto-watch.service; } \
+            >/dev/null 2>&1 || die 1 "wrote the units but could not enable and restart syncto-watch.service"
         printf 'Installed systemd user watch daemon syncto-watch.service\n'
         log info "" "installed systemd watch daemon"
     elif [ -f "$_is_dir/syncto-watch.service" ]; then
