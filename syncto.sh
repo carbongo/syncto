@@ -4,7 +4,7 @@
 
 set -eu
 
-SYNCTO_VERSION="1.1.0"
+SYNCTO_VERSION="1.1.1"
 SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
@@ -1218,7 +1218,8 @@ target_health() {
     H_DETAIL=""
     H_FIX=""
     if [ "$t_watch" = "on" ]; then
-        H_HOW="on save"
+        human_every_r "$t_debounce"
+        H_HOW="${REPLY#every } after save"
     else
         human_every_r "$t_interval"
         H_HOW=$REPLY
@@ -1395,7 +1396,7 @@ cmd_status() {
         target_health "$_st_i"
         level_style "$H_LEVEL"
         path_enc_r "$TGP"
-        printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$TGN" \
+        printf "%-${_st_w}s  %s%s %-20s%s  %-17s %s\n" "$TGN" \
             "$L_C" "$L_SYM" "$H_TEXT" "$C_OFF" "$H_HOW" "$REPLY"
         _st_line=$H_DETAIL
         # Long git output is cut to the terminal width; the fix line never is.
@@ -2554,7 +2555,7 @@ EOF
         D_TOP=$((D_TOP + 1))
     done
 
-    _dl_rest=$((D_COLS - _dl_w - 44))
+    _dl_rest=$((D_COLS - _dl_w - 46))
     [ "$_dl_rest" -lt 1 ] && _dl_rest=1
     _dl_i=$D_TOP
     while [ "$_dl_i" -lt "$D_N" ] && [ "$D_FL" -lt $((D_LINES - 4)) ]; do
@@ -2569,7 +2570,7 @@ EOF
             _dl_mark=" "
         fi
         # shellcheck disable=SC2154 # set by eval
-        printf -v _dl_cols '%-20s%s %-15s' "$_dl_tx" "$C_OFF" "$_dl_hw"
+        printf -v _dl_cols '%-20s%s %-17s' "$_dl_tx" "$C_OFF" "$_dl_hw"
         path_enc_r "$TGP"
         fit_r "$REPLY" "$_dl_rest"
         dash_add_line " ${_dl_mark} $_dl_name  $L_C$L_SYM $_dl_cols $C_DIM$REPLY$C_OFF"
@@ -2760,6 +2761,7 @@ dash_add() {
 
 # Fields of the edit screen: key|label|kind
 DASH_FIELDS="watch|Sync on every save|toggle
+debounce|Wait after last save|secs
 paused|Paused|toggle
 interval|Scheduled every|secs
 mode|Direction|mode
@@ -2779,6 +2781,7 @@ dash_field_value() {
         watch) printf '%s' "$t_watch" ;;
         paused) printf '%s' "$t_paused" ;;
         interval) human_every "$t_interval" | sed 's/^every //' ;;
+        debounce) human_every "$t_debounce" | sed 's/^every //' ;;
         mode)
             case "$t_mode" in
                 push) printf 'push only' ;;
@@ -2919,7 +2922,7 @@ dash_details() {
             *) _dt_dir="both ways" ;;
         esac
         if [ "$t_watch" = "on" ]; then
-            _dt_when="on every save, and $(human_every "$t_interval") as a backstop"
+            _dt_when="$(human_every "$t_debounce" | sed 's/^every //') after the last save, and $(human_every "$t_interval") as a backstop"
         else
             _dt_when=$(human_every "$t_interval")
         fi
@@ -2996,7 +2999,8 @@ EOF
     dash_add_line ""
     dash_add_line "   Each repo is a git folder with a remote. A sync commits your changes,"
     dash_add_line "   pulls with rebase and pushes. Background syncing (b) runs it on a"
-    dash_add_line "   schedule, and right after a save for repos set to sync on save."
+    dash_add_line "   schedule, and for repos set to sync on save, once you stop saving for"
+    dash_add_line "   a moment: each save restarts the wait (e, Wait after last save)."
     dash_add_line "   If both sides changed the same lines, syncto stops, leaves the repo"
     dash_add_line "   as it was and shows what to run to fix it."
     dash_add_line ""
@@ -3084,7 +3088,10 @@ COMMANDS
 
 TARGET OPTIONS   comma separated key=value; write \\, for a literal comma
   interval=SECONDS      minimum seconds between scheduled syncs   [$G_INTERVAL]
-  watch=on|off          sync within seconds of a file changing    [$G_WATCH]
+  watch=on|off          sync soon after you save, not on a timer   [$G_WATCH]
+  debounce=SECONDS      with watch=on, wait this long after the last
+                        save; each save restarts it, so typing syncs
+                        once you pause                            [$G_DEBOUNCE]
   paused=on|off         skip in background syncing and plain 'sync' [$G_PAUSED]
   mode=sync|push|pull   commit+pull+push / commit+push / pull only [$G_MODE]
   branch=NAME           branch to pull and push                   [$G_BRANCH]

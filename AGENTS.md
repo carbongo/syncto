@@ -11,9 +11,9 @@ One bash script, no build step. Public repo: changes go through PRs.
 | install | `./install.sh` (script to `~/.local/share/syncto/`, entry point `~/.local/bin/syncto`) |
 | test | `./test.sh`, and `/bin/bash ./test.sh` for bash 3.2 |
 | lint | `shellcheck -S warning syncto.sh install.sh uninstall.sh test.sh` |
-| release | bump `SYNCTO_VERSION`, merge, push tag `vX.Y.Z` (the Release workflow tests and publishes), then update `url` and `sha256` in `carbongo/homebrew-tap` `Formula/syncto.rb` |
+| release | bump `SYNCTO_VERSION`, merge, push tag `vX.Y.Z` (the Release workflow publishes), then update `url` and `sha256` in `carbongo/homebrew-tap` `Formula/syncto.rb` |
 
-CI (`.github/workflows/ci.yml`) runs the lint, and the tests on macOS (bash 3.2) and Ubuntu.
+CI (`.github/workflows/ci.yml`) runs the tests on macOS (bash 3.2) and Ubuntu, plus the lint on Ubuntu; it skips docs-only changes.
 
 ## Constraints
 

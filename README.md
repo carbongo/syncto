@@ -9,8 +9,9 @@
 # syncto
 
 **Git repos that keep themselves in sync.**<br>
-Commit, pull and push on a timer or as you save. When both sides changed the same
-lines it stops and tells you what to run, instead of guessing.
+Commit, pull and push on a timer or as you save. It waits until you stop typing, so an
+editor that autosaves never syncs half a sentence. When both sides changed the same lines
+it stops and tells you what to run, instead of guessing.
 
 [![CI](https://github.com/carbongo/syncto/actions/workflows/ci.yml/badge.svg)](https://github.com/carbongo/syncto/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/carbongo/syncto?color=2ea043)](https://github.com/carbongo/syncto/releases/latest)
@@ -40,7 +41,7 @@ Needs git and bash 3.2 or newer (the bash macOS ships works). `fswatch` or
 ## Quick start
 
 ```sh
-syncto add notes ~/notes watch=on   # sync ~/notes on every save
+syncto add notes ~/notes watch=on,debounce=30   # sync 30 s after the last save
 syncto start                        # keep syncing in the background
 syncto                              # dashboard: see, add, edit, pause and sync repos
 ```
@@ -48,10 +49,10 @@ syncto                              # dashboard: see, add, edit, pause and sync 
 `syncto status` prints the same health as text:
 
 ```
-notes     ✓ synced 2 min ago      on save         ~/notes
-dotfiles  · offline, retrying     every 10 min    ~/.dotfiles
+notes     ✓ synced 2 min ago      30 s after save   ~/notes
+dotfiles  · offline, retrying     every 10 min      ~/.dotfiles
             last synced 3 h ago. ssh: connect to host github.com port 22: Opera…
-work      ✗ needs you             on save         ~/work
+work      ✗ needs you             2 s after save    ~/work
             both sides changed README.md
             fix: cd ~/work && git pull --rebase, fix the files, git rebase --continue
 
