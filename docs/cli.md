@@ -43,3 +43,4 @@ Several repos in one run exit with the worst code, in the order 2, 3, 1, 4, 0.
 | ✗ needs you | a fix line says what to run |
 | ✗ failing | auth refused, the remote is missing, or a push or git command failed |
 | ✗ folder is missing, not a git repo | the path in the targets file is wrong |
+| ✗ inside another repo | the folder is part of a bigger repo; syncto syncs whole repos only |

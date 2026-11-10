@@ -464,14 +464,50 @@ test_locking() {
 
     run_syncto "$_t_sb" add work "$_t_work" "branch=main,mode=push,interval=60"
 
-    _lock_dir="$_t_sb/home/.local/state/syncto/locks/work.lock"
-    mkdir -p "$_lock_dir"
-    printf '999999 %s\n' "$(date +%s)" >"$_lock_dir/owner"
+    _lock="$_t_sb/home/.local/state/syncto/locks/work.pid"
 
+    # A live owner keeps its lock.
+    sleep 30 &
+    _t_live=$!
+    mkdir -p "${_lock%/*}"
+    printf '%s %s\n' "$_t_live" "$(date +%s)" >"$_lock"
     run_syncto "$_t_sb" sync work
-    assert_status "locking: held lock makes sync exit 4" 4 "$RC" "$OUT"
+    assert_status "locking: a live owner's lock makes sync exit 4" 4 "$RC" "$OUT"
+    kill "$_t_live" 2>/dev/null
+    wait "$_t_live" 2>/dev/null
 
-    rm -rf "$_lock_dir"
+    # A lock whose owner is still being written is busy, not stale.
+    : >"$_lock"
+    run_syncto "$_t_sb" sync work
+    assert_status "locking: a lock with no owner yet makes sync exit 4" 4 "$RC" "$OUT"
+
+    # A dead owner's lock is taken over.
+    sh -c 'exit 0' &
+    _t_dead=$!
+    wait "$_t_dead"
+    printf '%s %s\n' "$_t_dead" "$(date +%s)" >"$_lock"
+    run_syncto "$_t_sb" sync work
+    case "$RC" in
+        4) fail "locking: a dead owner's lock is taken over" "exit 4" ;;
+        *) assert_log "locking: a dead owner's lock is taken over" '*took over a stale lock: run * is gone*' ;;
+    esac
+    if [ -e "$_lock" ]; then
+        fail "locking: the lock is released after the sync" "still there"
+    else
+        ok "locking: the lock is released after the sync"
+    fi
+
+    # Two runs at once: exactly one syncs, the other finds the lock held.
+    run_syncto "$_t_sb" edit work "guard=sleep 2"
+    ( run_syncto "$_t_sb" sync work; echo "$RC" >"$_t_sb/rc1"; printf '%s' "$OUT" >"$_t_sb/out1" ) &
+    ( run_syncto "$_t_sb" sync work; echo "$RC" >"$_t_sb/rc2"; printf '%s' "$OUT" >"$_t_sb/out2" ) &
+    wait
+    case "$(cat "$_t_sb/rc1")$(cat "$_t_sb/rc2")" in
+        [0-3]4|4[0-3]) ok "locking: of two runs at once one syncs and one exits 4" ;;
+        *) fail "locking: of two runs at once one syncs and one exits 4" \
+            "$(cat "$_t_sb/rc1") $(cat "$_t_sb/rc2") | $(cat "$_t_sb/out1") | $(cat "$_t_sb/out2") | $(tail -n 6 "$_t_sb/home/.local/state/syncto/syncto.log")" ;;
+    esac
+    rm -f "$_lock"
 }
 
 # ---------------------------------------------------------------------------
@@ -625,6 +661,10 @@ test_help_version_unknown() {
 
     run_syncto "$_t_sb" help
     assert_status "help command: exits 0" 0 "$RC" "$OUT"
+    case "$OUT" in
+        *"╭──▶╮  ┌─┐┬ ┬┌┐┌┌─┐┌┬┐┌─┐"*"keeps git repos in sync"*) ok "help: opens with the logo" ;;
+        *) fail "help: opens with the logo" "$OUT" ;;
+    esac
 
     run_syncto "$_t_sb" frobnicate
     case "$RC:$OUT" in
@@ -1084,6 +1124,14 @@ test_dashboard() {
     esac
 
     run_in_pty "$_t_sb" pq
+
+    git -C "$_t_target" remote add origin "https://user:tok123@example.invalid/x.git"
+    run_in_pty "$_t_sb" $'\r'qq
+    case "$OUT" in
+        *tok123*) fail "dashboard: hides credentials in remote URLs" "$OUT" ;;
+        *"https://example.invalid/x.git"*) ok "dashboard: hides credentials in remote URLs" ;;
+        *) fail "dashboard: hides credentials in remote URLs" "$OUT" ;;
+    esac
     case "$(cat "$_t_sb/home/.config/syncto/targets")" in
         *paused=on*) ok "dashboard: p pauses the selected repo" ;;
         *) fail "dashboard: p pauses the selected repo" "$(cat "$_t_sb/home/.config/syncto/targets")" ;;
@@ -1114,6 +1162,18 @@ test_start_reloads() {
                     ok "start: reloads a running launchd watch agent" ;;
                 *) fail "start: reloads a running launchd watch agent" "$_t_calls" ;;
             esac
+            if xcode-select -p >/dev/null 2>&1; then
+                _t_args=$(plutil -extract ProgramArguments.0 raw -o - \
+                    "$_t_sb/home/Library/LaunchAgents/com.user.syncto.plist" 2>/dev/null)
+                case "$_t_args" in
+                    */.local/share/syncto/launcher) ok "start: launchd starts the launcher, not /bin/bash" ;;
+                    *) fail "start: launchd starts the launcher, not /bin/bash" "$_t_args" ;;
+                esac
+                case "$("$_t_args" "$SYNCTO" version 2>&1)" in
+                    "syncto "*) ok "start: the launcher runs syncto" ;;
+                    *) fail "start: the launcher runs syncto" "$("$_t_args" "$SYNCTO" version 2>&1)" ;;
+                esac
+            fi
             ;;
         *)
             case "$_t_calls" in
@@ -1126,6 +1186,201 @@ test_start_reloads() {
 }
 
 # ---------------------------------------------------------------------------
+# security: branch and remote values
+# ---------------------------------------------------------------------------
+
+test_branch_remote_values() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    run_syncto "$_t_sb" add a "$_t_work" "remote=--upload-pack=touch $_t_sb/PWNED"
+    assert_status "values: a remote starting with - is refused" 3 "$RC" "$OUT"
+    run_syncto "$_t_sb" add b "$_t_work" 'branch=main\,guard=touch x'
+    assert_status "values: a branch with a comma is refused" 3 "$RC" "$OUT"
+    run_syncto "$_t_sb" add c "$_t_work" "branch=-x"
+    assert_status "values: a branch starting with - is refused" 3 "$RC" "$OUT"
+
+    # The dashboard's add form takes the branch the clone checked out.
+    if command -v script >/dev/null 2>&1; then
+        _t_evil='main,guard=touch${IFS}'"$_t_sb"'/PWNED'
+        _t_up="$_t_sb/home/up"
+        mkdir -p "$_t_up"
+        git_q "$_t_up" init
+        git_q "$_t_up" checkout -b "$_t_evil"
+        git_q "$_t_up" commit --allow-empty -m init
+        git clone -q "$_t_up" "$_t_sb/home/victim" 2>/dev/null
+        run_in_pty "$_t_sb" "a$_t_sb/home/victim"$'\r\r'nnq
+        run_syncto "$_t_sb" sync
+        if [ -e "$_t_sb/PWNED" ] || grep -q 'guard=' "$_t_sb/home/.config/syncto/targets" 2>/dev/null; then
+            fail "values: a branch name cannot plant a guard through the add form" "$(cat "$_t_sb/home/.config/syncto/targets")"
+        else
+            ok "values: a branch name cannot plant a guard through the add form"
+        fi
+    fi
+}
+
+test_control_characters() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    # A guard's output is logged; make it try to set the window title.
+    run_syncto "$_t_sb" add work "$_t_work" "guard=printf '\033]0;OWNED\007\033[2K\302\233X'; exit 7"
+    run_syncto "$_t_sb" sync work
+    _t_esc=$(printf '\033')
+    _t_csi=$(printf '\302\233')
+    case "$(cat "$_t_sb/home/.local/state/syncto/syncto.log")" in
+        *"$_t_esc"*|*"$_t_csi"*|*$'\007'*) fail "control: the log keeps no control characters" "$(cat -v "$_t_sb/home/.local/state/syncto/syncto.log")" ;;
+        *OWNED*) ok "control: the log keeps no control characters" ;;
+        *) fail "control: the log keeps no control characters" "guard output missing" ;;
+    esac
+    # Text written by an older version is cleaned when shown.
+    mkdir -p "$_t_sb/home/.local/state/syncto/outcome"
+    printf 'error\t1\tbad %s]0;X%s\n' "$_t_esc" "$(printf '\007')" >"$_t_sb/home/.local/state/syncto/outcome/work"
+    printf '2026-01-01T00:00:00+0000 level=error target=work msg="raw %s[31m"\n' "$_t_esc" >>"$_t_sb/home/.local/state/syncto/syncto.log"
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"$_t_esc"*) fail "control: status shows no control characters" "$(printf '%s' "$OUT" | cat -v)" ;;
+        *"failing"*"bad ]0;X"*) ok "control: status shows no control characters" ;;
+        *) fail "control: status shows no control characters" "$OUT" ;;
+    esac
+    run_syncto "$_t_sb" log
+    case "$OUT" in
+        *"$_t_esc"*) fail "control: syncto log shows no control characters" "$(printf '%s' "$OUT" | cat -v)" ;;
+        *) ok "control: syncto log shows no control characters" ;;
+    esac
+}
+
+test_subfolder_target() {
+    _t_sb=$(new_sandbox)
+    _t_outer="$_t_sb/home/outer"
+    mkdir -p "$_t_outer/notes" "$_t_outer/.ssh"
+    git_q "$_t_outer" init
+    git_q "$_t_outer" checkout -B main
+    git_q "$_t_outer" commit --allow-empty -m init
+    git -C "$_t_outer" config user.email t@example.invalid
+    git -C "$_t_outer" config user.name t
+    printf 'secret\n' >"$_t_outer/.ssh/id_test"
+    printf 'note\n' >"$_t_outer/notes/a.md"
+    run_syncto "$_t_sb" add notes "$_t_outer/notes"
+    case "$RC:$OUT" in
+        3:*"inside the git repo"*) ok "subfolder: add refuses a folder inside a repo" ;;
+        *) fail "subfolder: add refuses a folder inside a repo" "$RC $OUT" ;;
+    esac
+    mkdir -p "$_t_sb/home/.config/syncto"
+    printf 'notes\t%s\tbranch=main\n' "$_t_outer/notes" >"$_t_sb/home/.config/syncto/targets"
+    run_syncto "$_t_sb" sync notes
+    assert_status "subfolder: sync refuses it with exit 3" 3 "$RC" "$OUT"
+    if [ "$(git -C "$_t_outer" rev-list --count HEAD)" = "1" ]; then
+        ok "subfolder: nothing in the enclosing repo is committed"
+    else
+        fail "subfolder: nothing in the enclosing repo is committed" "$(git -C "$_t_outer" log --stat -1)"
+    fi
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"inside another repo"*) ok "status: a subfolder says it is inside another repo" ;;
+        *) fail "status: a subfolder says it is inside another repo" "$OUT" ;;
+    esac
+}
+
+test_private_files() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    run_syncto "$_t_sb" add work "$_t_work"
+    case "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto" | cut -c1-10 | sort -u)" in
+        drwx------) ok "private: new config and state folders are owner-only" ;;
+        *) fail "private: new config and state folders are owner-only" "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto")" ;;
+    esac
+    chmod 755 "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto"
+    chmod 644 "$_t_sb/home/.config/syncto/targets"
+    mkdir -p "$_t_sb/stub"
+    for _t_b in launchctl systemctl; do
+        printf '#!/bin/sh\nexit 0\n' >"$_t_sb/stub/$_t_b"
+        chmod +x "$_t_sb/stub/$_t_b"
+    done
+    run_syncto_path "$_t_sb" "$_t_sb/stub" start
+    case "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto" | cut -c1-10 | sort -u):$(ls -l "$_t_sb/home/.config/syncto/targets" | cut -c1-10)" in
+        "drwx------:-rw-------") ok "private: start makes existing ones owner-only" ;;
+        *) fail "private: start makes existing ones owner-only" "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto" "$_t_sb/home/.config/syncto/targets")" ;;
+    esac
+}
+
+test_key_path_quoting() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work" "$_t_sb/stub"
+    git_q "$_t_work" init
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" commit --allow-empty -m init
+    git_q "$_t_work" remote add origin "ssh://git@example.invalid/x.git"
+    # A stand-in ssh records the key path it was given.
+    printf '#!/bin/sh\nprintf "%%s" "$2" >"%s/got"\nexit 255\n' "$_t_sb" >"$_t_sb/stub/ssh"
+    chmod +x "$_t_sb/stub/ssh"
+    _t_key="$_t_sb/it's \$(touch $_t_sb/PWNED) \`x\` \"k\""
+    mkdir -p "$_t_sb/home/.config/syncto"
+    printf 'work\t%s\tbranch=main,key=%s\n' "$_t_work" "$(printf '%s' "$_t_key" | sed 's/,/\\,/g')" \
+        >"$_t_sb/home/.config/syncto/targets"
+    run_syncto_path "$_t_sb" "$_t_sb/stub" sync work
+    if [ -e "$_t_sb/PWNED" ]; then
+        fail "key: the key path is never run as shell code" "PWNED created"
+    else
+        ok "key: the key path is never run as shell code"
+    fi
+    if [ "$(cat "$_t_sb/got" 2>/dev/null)" = "$_t_key" ]; then
+        ok "key: ssh gets the exact key path"
+    else
+        fail "key: ssh gets the exact key path" "got [$(cat "$_t_sb/got" 2>/dev/null)] want [$_t_key]"
+    fi
+}
+
+test_files_kept_in_place() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work" "$_t_sb/home/dotfiles"
+    git_q "$_t_work" init
+
+    # A symlinked targets file stays a symlink when syncto edits it.
+    mkdir -p "$_t_sb/home/.config/syncto"
+    printf 'work\t%s\tinterval=60\n' "$_t_work" >"$_t_sb/home/dotfiles/targets"
+    ln -s "$_t_sb/home/dotfiles/targets" "$_t_sb/home/.config/syncto/targets"
+    run_syncto "$_t_sb" edit work interval=90
+    if [ -L "$_t_sb/home/.config/syncto/targets" ] && grep -q interval=90 "$_t_sb/home/dotfiles/targets"; then
+        ok "files: edit keeps a symlinked targets file a symlink"
+    else
+        fail "files: edit keeps a symlinked targets file a symlink" "$(ls -l "$_t_sb/home/.config/syncto/")"
+    fi
+
+    # Rotation copies and truncates, so the log stays the same file.
+    printf 'log_max=200\n' >"$_t_sb/home/.config/syncto/config"
+    _t_log="$_t_sb/home/.local/state/syncto/syncto.log"
+    mkdir -p "${_t_log%/*}"
+    printf '%0300d\n' 0 >"$_t_log"
+    _t_inode=$(ls -i "$_t_log" | awk '{print $1}')
+    run_syncto "$_t_sb" status
+    if [ -s "$_t_log.1" ] && [ "$(ls -i "$_t_log" | awk '{print $1}')" = "$_t_inode" ] &&
+       [ "$(wc -c <"$_t_log" | tr -d ' ')" -lt 200 ]; then
+        ok "files: log rotation keeps writing to the same file"
+    else
+        fail "files: log rotation keeps writing to the same file" "$(ls -li "${_t_log%/*}")"
+    fi
+
+    # uninstall keeps a symlinked rc file a symlink, and its mode.
+    printf 'keep\n\n# added by syncto installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >"$_t_sb/home/dotfiles/zshrc"
+    chmod 600 "$_t_sb/home/dotfiles/zshrc"
+    ln -s "$_t_sb/home/dotfiles/zshrc" "$_t_sb/home/.zshrc"
+    HOME="$_t_sb/home" ZDOTDIR="$_t_sb/home" sh "$HERE/uninstall.sh" >/dev/null 2>&1
+    if [ -L "$_t_sb/home/.zshrc" ] && ! grep -q 'syncto installer' "$_t_sb/home/dotfiles/zshrc" &&
+       [ "$(ls -l "$_t_sb/home/dotfiles/zshrc" | cut -c1-10)" = "-rw-------" ]; then
+        ok "files: uninstall keeps a symlinked rc file and its mode"
+    else
+        fail "files: uninstall keeps a symlinked rc file and its mode" "$(ls -l "$_t_sb/home/.zshrc" "$_t_sb/home/dotfiles/zshrc"; cat "$_t_sb/home/dotfiles/zshrc")"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
@@ -1134,6 +1389,12 @@ test_edit_options
 test_paused
 test_dashboard
 test_start_reloads
+test_branch_remote_values
+test_control_characters
+test_subfolder_target
+test_private_files
+test_key_path_quoting
+test_files_kept_in_place
 test_sync_basic
 test_conflict
 test_network_error_not_conflict

@@ -23,6 +23,8 @@ CI (`.github/workflows/ci.yml`) runs the lint, and the tests on macOS (bash 3.2)
 - Brace a variable followed by a non-ASCII character (`${name}…`): bash 3.2 reads the
   bytes as part of the name.
 - Never auto-resolve a conflict; never rebase into a dirty tree (no `--autostash`).
+- Locks are files created with bash noclobber (`set -C`): `mkdir` is not atomic in
+  uutils coreutils, which Ubuntu ships.
 - launchd and systemd have no ssh-agent: targets use `key=` or `GIT_SSH_COMMAND`.
 - Comments: one line, only where the code alone would mislead.
 - Tests stub `fswatch` and `inotifywait`; a real watcher never exits and hangs the suite.

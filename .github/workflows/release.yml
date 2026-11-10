@@ -5,19 +5,36 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Tag matches SYNCTO_VERSION
         run: |
           v=$(sed -n 's/^SYNCTO_VERSION="\(.*\)"$/\1/p' syncto.sh)
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag is $GITHUB_REF_NAME but syncto.sh says $v"; exit 1; }
       - run: /bin/bash ./test.sh
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Pin install.sh to this release and list checksums
+        run: |
+          sed -i "s/^SYNCTO_TAG=latest$/SYNCTO_TAG=$GITHUB_REF_NAME/" install.sh
+          grep -q "^SYNCTO_TAG=$GITHUB_REF_NAME$" install.sh
+          sha256sum syncto.sh install.sh config.example >SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" syncto.sh install.sh config.example --title "syncto $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" syncto.sh install.sh config.example SHA256SUMS --repo "$GITHUB_REPOSITORY" --title "syncto $GITHUB_REF_NAME" --generate-notes

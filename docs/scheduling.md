@@ -20,6 +20,8 @@ scheduled syncs fail while manual ones work. Prefer a deploy key limited to that
 ## macOS protected folders
 
 iCloud Drive, `~/Documents` and `~/Desktop` need Full Disk Access for the program launchd
-starts, which is `/bin/bash`: System Settings → Privacy & Security → Full Disk Access →
-add `/bin/bash`. Without it the folder reads as empty and `status` says "not a git repo";
-syncto never stages what it cannot see.
+starts. `syncto start` builds that program once, `~/.local/share/syncto/launcher`, if the
+Xcode Command Line Tools are installed. Grant it alone: System Settings → Privacy &
+Security → Full Disk Access → + → ⇧⌘G, paste the path. Never grant `/bin/bash`: every
+LaunchAgent could then use it. Without the tools syncto starts `/bin/bash` and does not
+support protected folders; their folder reads as empty and `status` says "not a git repo".

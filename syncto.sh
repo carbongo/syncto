@@ -4,7 +4,7 @@
 
 set -eu
 
-SYNCTO_VERSION="1.0.1"
+SYNCTO_VERSION="1.1.0"
 SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
@@ -42,12 +42,19 @@ timestamp() {
 }
 
 epoch() {
-    date '+%s'
+    if [ -n "${EPOCHSECONDS:-}" ]; then
+        printf '%s' "$EPOCHSECONDS"
+    else
+        date '+%s'
+    fi
 }
 
 # Strip newlines so a log record always stays on one line.
+# Strip newlines so a log record always stays on one line, and every other
+# control character so git or remote output cannot drive the terminal.
 oneline() {
-    printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/  */ /g; s/^ //; s/ $//'
+    printf '%s' "$1" | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' |
+        LC_ALL=C sed "s/$C1_RE//g; s/  */ /g; s/^ //; s/ \$//"
 }
 
 # log LEVEL TARGET MESSAGE
@@ -59,7 +66,8 @@ log() {
     if [ -n "${LOG_FILE:-}" ]; then
         _lg_dir=$(dirname "$LOG_FILE")
         if [ ! -d "$_lg_dir" ]; then
-            mkdir -p "$_lg_dir" 2>/dev/null || :
+            # shellcheck disable=SC2174 # only the last folder needs to be private
+            mkdir -p -m 700 "$_lg_dir" 2>/dev/null || :
         fi
         printf '%s\n' "$_lg_line" >>"$LOG_FILE" 2>/dev/null || :
     fi
@@ -80,7 +88,9 @@ log_rotate_maybe() {
         ''|*[!0-9]*) return 0 ;;
     esac
     [ "$_lr_size" -gt "$LOG_MAX" ] || return 0
-    mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
+    # Copy, then truncate: a daemon's stderr stays open on this same file.
+    cp -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
+    : >"$LOG_FILE"
     return 0
 }
 
@@ -121,10 +131,16 @@ worst_code() {
 # ---------------------------------------------------------------------------
 
 path_encode() {
+    path_enc_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# path_enc_r PATH: REPLY is PATH with $HOME written as ~.
+path_enc_r() {
     case "$1" in
-        "$HOME") printf '~' ;;
-        "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
-        *) printf '%s' "$1" ;;
+        "$HOME") REPLY='~' ;;
+        "$HOME"/*) REPLY="~${1#"$HOME"}" ;;
+        *) REPLY=$1 ;;
     esac
 }
 
@@ -152,29 +168,23 @@ abs_path() {
 # Split a comma separated option list, honouring "\," as a literal comma.
 # One option per output line.
 split_opts() {
-    _so_in=$1
-    _so_cur=""
-    while [ -n "$_so_in" ]; do
-        _so_c=${_so_in%"${_so_in#?}"}
-        _so_in=${_so_in#?}
-        if [ "$_so_c" = "\\" ] && [ -n "$_so_in" ]; then
-            _so_n=${_so_in%"${_so_in#?}"}
-            _so_in=${_so_in#?}
-            if [ "$_so_n" = "," ]; then
-                _so_cur="$_so_cur,"
-            else
-                _so_cur="$_so_cur$_so_c$_so_n"
-            fi
-        elif [ "$_so_c" = "," ]; then
-            printf '%s\n' "$_so_cur"
-            _so_cur=""
-        else
-            _so_cur="$_so_cur$_so_c"
-        fi
+    split_opts_a "$1"
+    [ "${#SO[@]}" -eq 0 ] || printf '%s\n' "${SO[@]}"
+    return 0
+}
+
+# split_opts_a OPTS: array SO holds the options, with "\," kept as a comma.
+split_opts_a() {
+    SO=()
+    _so_s=${1//\\,/$SO_SEP}
+    while [ -n "$_so_s" ]; do
+        _so_i=${_so_s%%,*}
+        case "$_so_s" in
+            *,*) _so_s=${_so_s#*,} ;;
+            *) _so_s="" ;;
+        esac
+        [ -n "$_so_i" ] && SO[${#SO[@]}]=${_so_i//$SO_SEP/,}
     done
-    if [ -n "$_so_cur" ]; then
-        printf '%s\n' "$_so_cur"
-    fi
     return 0
 }
 
@@ -188,12 +198,28 @@ known_key() {
 }
 
 trim() {
-    printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+    trim_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# trim_r TEXT: REPLY is TEXT without surrounding whitespace, without a subshell.
+trim_r() {
+    REPLY=${1#"${1%%[![:space:]]*}"}
+    REPLY=${REPLY%"${REPLY##*[![:space:]]}"}
 }
 
 validate_value() {
     # validate_value KEY VALUE -> 0 ok, 1 bad (message on stderr)
     case "$1" in
+        branch|remote)
+            # Passed to git as arguments: no option lookalikes, separators or controls.
+            case "$2" in
+                ''|-*|*[[:space:],]*|*[[:cntrl:]]*)
+                    warn "$1 must be a plain name (no leading '-', spaces, commas or control characters), got '$2'"
+                    return 1
+                    ;;
+            esac
+            ;;
         interval)
             case "$2" in
                 ''|*[!0-9]*) warn "interval must be a whole number of seconds, got '$2'"; return 1 ;;
@@ -283,7 +309,8 @@ load_config() {
                 continue
                 ;;
         esac
-        _lc_k=$(trim "${_lc_line%%=*}")
+        trim_r "${_lc_line%%=*}"
+        _lc_k=$REPLY
         _lc_v=${_lc_line#*=}
         if ! known_key "$_lc_k"; then
             warn "$CONFIG_FILE:$_lc_n: unknown key '$_lc_k', ignored"
@@ -330,7 +357,10 @@ apply_ssh_env() {
         GIT_SSH_COMMAND=$1
         export GIT_SSH_COMMAND
     elif [ -n "$2" ]; then
-        GIT_SSH_COMMAND="ssh -i \"$2\" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
+        # git runs this through sh: single-quote the path so nothing in it expands.
+        _ak_q="'\\''"
+        _ak_key=${2//\'/$_ak_q}
+        GIT_SSH_COMMAND="ssh -i '$_ak_key' -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
         export GIT_SSH_COMMAND
     else
         unset GIT_SSH_COMMAND 2>/dev/null || :
@@ -344,6 +374,9 @@ apply_ssh_env() {
 
 TG_COUNT=0
 TAB=$(printf '\t')
+# C1 control characters (UTF-8 U+0080..U+009F), such as the 8-bit CSI.
+C1_RE=$'\302'"["$'\200'"-"$'\237'"]"
+SO_SEP=$'\001'
 
 targets_load() {
     TG_COUNT=0
@@ -355,23 +388,31 @@ targets_load() {
         case "$_tl_line" in
             ''|'#'*) continue ;;
         esac
-        _tl_name=""
-        _tl_path=""
-        _tl_opts=""
-        IFS="$TAB" read -r _tl_name _tl_path _tl_opts <<EOF || :
-$_tl_line
-EOF
-        if [ -z "$_tl_name" ] || [ -z "$_tl_path" ]; then
+        _tl_name=${_tl_line%%"$TAB"*}
+        _tl_rest=${_tl_line#*"$TAB"}
+        _tl_path=${_tl_rest%%"$TAB"*}
+        case "$_tl_rest" in
+            *"$TAB"*) _tl_opts=${_tl_rest#*"$TAB"} ;;
+            *) _tl_opts="" ;;
+        esac
+        if [ "$_tl_name" = "$_tl_line" ] || [ -z "$_tl_name" ] || [ -z "$_tl_path" ]; then
             warn "$TARGETS_FILE:$_tl_n: expected NAME<TAB>PATH[<TAB>OPTIONS], ignored"
             TG_MALFORMED=1
             continue
         fi
-        eval "TG_NAME_$TG_COUNT=\$_tl_name"
-        eval "TG_PATH_$TG_COUNT=\$(path_decode \"\$_tl_path\")"
-        eval "TG_OPTS_$TG_COUNT=\$_tl_opts"
+        case "$_tl_path" in
+            \~) _tl_path=$HOME ;;
+            \~/*) _tl_path="$HOME${_tl_path#\~}" ;;
+        esac
+        eval "TG_NAME_$TG_COUNT=\$_tl_name TG_PATH_$TG_COUNT=\$_tl_path TG_OPTS_$TG_COUNT=\$_tl_opts"
         TG_COUNT=$((TG_COUNT + 1))
     done <"$TARGETS_FILE"
     return 0
+}
+
+# tg_get INDEX: TGN, TGP and TGO are that target's name, path and options.
+tg_get() {
+    eval "TGN=\$TG_NAME_$1 TGP=\$TG_PATH_$1 TGO=\$TG_OPTS_$1"
 }
 
 TG_MALFORMED=0
@@ -418,10 +459,11 @@ resolve_opts() {
     t_ssh=$G_SSH
     t_rc=0
     [ "$t_remote_poll" = "off" ] && t_remote_poll=0
-    _ro_opts=$1
-    [ -n "$_ro_opts" ] || return 0
-    while IFS= read -r _ro_kv; do
-        _ro_kv=$(trim "$_ro_kv")
+    [ -n "$1" ] || return 0
+    split_opts_a "$1"
+    for _ro_kv in ${SO[@]+"${SO[@]}"}; do
+        trim_r "$_ro_kv"
+        _ro_kv=$REPLY
         [ -n "$_ro_kv" ] || continue
         case "$_ro_kv" in
             *=*) : ;;
@@ -431,7 +473,8 @@ resolve_opts() {
                 continue
                 ;;
         esac
-        _ro_k=$(trim "${_ro_kv%%=*}")
+        trim_r "${_ro_kv%%=*}"
+        _ro_k=$REPLY
         _ro_v=${_ro_kv#*=}
         if ! known_key "$_ro_k"; then
             warn "unknown option '$_ro_k', ignored"
@@ -460,9 +503,7 @@ resolve_opts() {
             ssh|GIT_SSH_COMMAND) t_ssh=$_ro_v ;;
             log|log_max) : ;;
         esac
-    done <<EOF
-$(split_opts "$_ro_opts")
-EOF
+    done
     [ "$t_remote_poll" = "off" ] && t_remote_poll=0
     return 0
 }
@@ -472,43 +513,80 @@ EOF
 # ---------------------------------------------------------------------------
 
 safe_name() {
-    printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+    printf '%s' "${1//[!A-Za-z0-9._-]/_}"
+}
+
+# Locks are files created with O_EXCL through bash's noclobber, which is atomic
+# on every filesystem; mkdir is not atomic in every coreutils (uutils races).
+# lock_create FILE -> 0 if this run created FILE, holding "PID EPOCH".
+lock_create() {
+    set -C
+    { printf '%s %s\n' "$$" "$(epoch)" >"$1"; } 2>/dev/null
+    _lc_rc=$?
+    set +C
+    return "$_lc_rc"
 }
 
 lock_acquire() {
-    # lock_acquire NAME STALE_AFTER_SECONDS -> 0 acquired, 1 held by someone else
-    _la_dir="$LOCK_DIR/$(safe_name "$1").lock"
+    # lock_acquire NAME STALE_AFTER_SECONDS -> 0 acquired, 1 held by another run
+    _la_file="$LOCK_DIR/${1//[!A-Za-z0-9._-]/_}.pid"
     _la_stale=$2
+    [ "$_la_stale" -lt 3600 ] && _la_stale=3600
     mkdir -p "$LOCK_DIR" 2>/dev/null || :
-    if mkdir "$_la_dir" 2>/dev/null; then
-        printf '%s %s\n' "$$" "$(epoch)" >"$_la_dir/owner" 2>/dev/null || :
-        HELD_LOCK=$_la_dir
+    if lock_create "$_la_file"; then
+        HELD_LOCK=$_la_file
         return 0
     fi
-    # Someone holds it. Steal it if it is older than the stale window.
-    _la_started=0
-    if [ -f "$_la_dir/owner" ]; then
-        _la_started=$(awk '{print $2}' "$_la_dir/owner" 2>/dev/null || printf '0')
+    _la_owner=""
+    { read -r _la_owner || :; } 2>/dev/null <"$_la_file"
+    _la_pid=${_la_owner%% *}
+    _la_started=${_la_owner#* }
+    case "$_la_pid" in ''|*[!0-9]*) _la_pid="" ;; esac
+    case "$_la_started" in ''|*[!0-9]*) _la_started=0 ;; esac
+    if [ -z "$_la_pid" ]; then
+        # Empty: another run is between creating and filling it. Only a lock
+        # left like that for over a minute is abandoned.
+        [ -n "$(find "$_la_file" -mmin +1 2>/dev/null)" ] || return 1
+        _la_why="it had no owner"
+    elif kill -0 "$_la_pid" 2>/dev/null; then
+        # A live owner keeps it, unless it has held it far too long (a hung
+        # git, or a PID the system has since reused).
+        [ $(( $(epoch) - _la_started )) -gt "$_la_stale" ] || return 1
+        _la_why="run $_la_pid held it over ${_la_stale}s"
+    else
+        _la_why="run $_la_pid is gone"
     fi
-    case "$_la_started" in
-        ''|*[!0-9]*) _la_started=0 ;;
-    esac
-    _la_age=$(( $(epoch) - _la_started ))
-    if [ "$_la_started" -eq 0 ] || [ "$_la_age" -gt "$_la_stale" ]; then
-        log warn "$1" "stealing stale lock (age ${_la_age}s > ${_la_stale}s)"
-        rm -rf "$_la_dir" 2>/dev/null || :
-        if mkdir "$_la_dir" 2>/dev/null; then
-            printf '%s %s\n' "$$" "$(epoch)" >"$_la_dir/owner" 2>/dev/null || :
-            HELD_LOCK=$_la_dir
-            return 0
+    # One takeover at a time, and only of the lock judged stale: without this,
+    # a slower run could remove the fresh lock a faster one just took.
+    if ! lock_create "$_la_file.takeover"; then
+        # Left behind by a run that died mid-takeover.
+        [ -n "$(find "$_la_file.takeover" -mmin +1 2>/dev/null)" ] &&
+            rm -f "$_la_file.takeover"
+        return 1
+    fi
+    _la_now=""
+    { read -r _la_now || :; } 2>/dev/null <"$_la_file"
+    _la_rc=1
+    if [ "$_la_now" = "$_la_owner" ]; then
+        rm -f "$_la_file"
+        if lock_create "$_la_file"; then
+            HELD_LOCK=$_la_file
+            log warn "$1" "took over a stale lock: $_la_why"
+            _la_rc=0
         fi
     fi
-    return 1
+    rm -f "$_la_file.takeover"
+    return "$_la_rc"
 }
 
+# lock_release: removes the lock only while this run still owns it.
 lock_release() {
     if [ -n "$HELD_LOCK" ]; then
-        rm -rf "$HELD_LOCK" 2>/dev/null || :
+        _lr_owner=""
+        { read -r _lr_owner || :; } 2>/dev/null <"$HELD_LOCK"
+        if [ "${_lr_owner%% *}" = "$$" ]; then
+            rm -f "$HELD_LOCK"
+        fi
         HELD_LOCK=""
     fi
     return 0
@@ -628,6 +706,13 @@ git_in() {
     git -C "$_gi_path" "$@" </dev/null
 }
 
+# repo_root_ok PATH -> 0 if PATH is the top folder of its git work tree; sets _rr_top
+repo_root_ok() {
+    _rr_top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+    _rr_here=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+    [ "$_rr_top" = "$_rr_here" ]
+}
+
 # sync_one INDEX -> exit code for that target
 sync_one() {
     _s_i=$1
@@ -652,6 +737,12 @@ sync_one() {
     fi
     if ! git_in "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         outcome "$name" error "not a git working tree: $path"
+        lock_release
+        return 3
+    fi
+    # git add -A stages the whole work tree, so a subfolder would sync its parent repo.
+    if [ ! -e "$path/.git" ] && ! repo_root_ok "$path"; then
+        outcome "$name" error "not the top folder of its git repo: $path"
         lock_release
         return 3
     fi
@@ -878,15 +969,14 @@ mark_ok() {
 }
 
 last_ok() {
-    _lo_f="$OK_DIR/$(safe_name "$1")"
-    _lo_v=0
+    _lo_f="$OK_DIR/${1//[!A-Za-z0-9._-]/_}"
+    REPLY=0
     if [ -f "$_lo_f" ]; then
-        _lo_v=$(sed -n '1p' "$_lo_f" 2>/dev/null || printf '0')
+        { read -r REPLY || :; } <"$_lo_f" 2>/dev/null
     fi
-    case "$_lo_v" in
-        ''|*[!0-9]*) _lo_v=0 ;;
+    case "$REPLY" in
+        ''|*[!0-9]*) REPLY=0 ;;
     esac
-    printf '%s' "$_lo_v"
 }
 
 # outcome NAME KIND MESSAGE: log a failed pass and keep it for status.
@@ -906,14 +996,20 @@ outcome() {
 # stale_limit -> seconds without a sync before a target is stale, or "off".
 # 0 derives it from the interval. Uses the caller's t_*.
 stale_limit() {
+    stale_limit_r
+    printf '%s' "$REPLY"
+}
+
+# stale_limit_r: REPLY is stale_limit's answer, without a subshell.
+stale_limit_r() {
     if [ "$t_stale" = "off" ]; then
-        printf 'off'
+        REPLY=off
         return 0
     fi
-    _sl=$t_stale
-    [ "$_sl" -eq 0 ] && _sl=$((t_interval * 12))
-    [ "$_sl" -lt 600 ] && _sl=600
-    printf '%s' "$_sl"
+    REPLY=$t_stale
+    [ "$REPLY" -eq 0 ] && REPLY=$((t_interval * 12))
+    [ "$REPLY" -lt 600 ] && REPLY=600
+    return 0
 }
 
 # stale_check NAME: alert when a target has not synced for too long,
@@ -922,7 +1018,8 @@ stale_check() {
     _sc_name=$1
     _sc_limit=$(stale_limit)
     [ "$_sc_limit" = "off" ] && return 0
-    _sc_last=$(last_ok "$_sc_name")
+    last_ok "$_sc_name"
+    _sc_last=$REPLY
     if [ "$_sc_last" -eq 0 ]; then
         # First run: start the clock instead of alerting.
         mark_ok "$_sc_name"
@@ -950,15 +1047,14 @@ mark_run() {
 }
 
 last_run() {
-    _lr_f="$LAST_DIR/$(safe_name "$1")"
-    _lr_v=0
+    _lr_f="$LAST_DIR/${1//[!A-Za-z0-9._-]/_}"
+    REPLY=0
     if [ -f "$_lr_f" ]; then
-        _lr_v=$(sed -n '1p' "$_lr_f" 2>/dev/null || printf '0')
+        { read -r REPLY || :; } <"$_lr_f" 2>/dev/null
     fi
-    case "$_lr_v" in
-        ''|*[!0-9]*) _lr_v=0 ;;
+    case "$REPLY" in
+        ''|*[!0-9]*) REPLY=0 ;;
     esac
-    printf '%s' "$_lr_v"
 }
 
 # ---------------------------------------------------------------------------
@@ -1044,7 +1140,8 @@ cmd_run() {
             _cd_i=$((_cd_i + 1))
             continue
         fi
-        _cd_last=$(last_run "$_cd_name")
+        last_run "$_cd_name"
+        _cd_last=$REPLY
         _cd_age=$((_cd_now - _cd_last))
         # Grace window (10% of the interval, 5..30 s): schedulers drift, and an
         # exact interval would skip every other pass.
@@ -1069,25 +1166,37 @@ cmd_run() {
 
 # human_ago SECONDS -> "just now", "4 min ago", "3 h ago", "2 days ago"
 human_ago() {
+    human_ago_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# human_ago_r SECONDS: REPLY is human_ago's answer, without a subshell.
+human_ago_r() {
     if [ "$1" -lt 60 ]; then
-        printf 'just now'
+        REPLY="just now"
     elif [ "$1" -lt 3600 ]; then
-        printf '%s min ago' $(($1 / 60))
+        REPLY="$(($1 / 60)) min ago"
     elif [ "$1" -lt 172800 ]; then
-        printf '%s h ago' $(($1 / 3600))
+        REPLY="$(($1 / 3600)) h ago"
     else
-        printf '%s days ago' $(($1 / 86400))
+        REPLY="$(($1 / 86400)) days ago"
     fi
 }
 
 # human_every SECONDS -> "every 10 min", "every 1 h", "every 90 s"
 human_every() {
+    human_every_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# human_every_r SECONDS: REPLY is human_every's answer, without a subshell.
+human_every_r() {
     if [ $(($1 % 3600)) -eq 0 ]; then
-        printf 'every %s h' $(($1 / 3600))
+        REPLY="every $(($1 / 3600)) h"
     elif [ $(($1 % 60)) -eq 0 ]; then
-        printf 'every %s min' $(($1 / 60))
+        REPLY="every $(($1 / 60)) min"
     else
-        printf 'every %s s' "$1"
+        REPLY="every $1 s"
     fi
 }
 
@@ -1095,22 +1204,24 @@ human_every() {
 cd_hint() {
     case "$1" in
         *" "*) printf 'cd "%s"' "$1" ;;
-        *) printf 'cd %s' "$(path_encode "$1")" ;;
+        *) path_enc_r "$1"; printf 'cd %s' "$REPLY" ;;
     esac
 }
 
 # target_health INDEX: sets H_LEVEL (ok, wait, warn, bad), H_TEXT, H_DETAIL,
 # H_FIX and H_HOW for that target, in words a person can act on.
 target_health() {
-    _th_name=$(tg_name "$1")
-    _th_path=$(tg_path "$1")
-    resolve_opts "$(tg_opts "$1")" || :
+    tg_get "$1"
+    _th_name=$TGN
+    _th_path=$TGP
+    resolve_opts "$TGO" || :
     H_DETAIL=""
     H_FIX=""
     if [ "$t_watch" = "on" ]; then
         H_HOW="on save"
     else
-        H_HOW=$(human_every "$t_interval")
+        human_every_r "$t_interval"
+        H_HOW=$REPLY
     fi
     case "$t_mode" in
         push) H_HOW="$H_HOW, push only" ;;
@@ -1121,20 +1232,35 @@ target_health() {
         H_LEVEL=bad H_TEXT="folder is missing" H_FIX="restore it, or: syncto remove $_th_name"
         return 0
     fi
-    if ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        H_LEVEL=bad H_TEXT="not a git repo" H_FIX="git init it, or: syncto remove $_th_name"
-        return 0
+    if [ ! -e "$_th_path/.git" ]; then
+        if ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            H_LEVEL=bad H_TEXT="not a git repo" H_FIX="git init it, or: syncto remove $_th_name"
+            return 0
+        fi
+        if ! repo_root_ok "$_th_path"; then
+            path_enc_r "$_rr_top"
+            H_LEVEL=bad H_TEXT="inside another repo"
+            H_DETAIL="syncto syncs whole repos, and this folder is part of $REPLY"
+            H_FIX="sync $REPLY instead, or: syncto remove $_th_name"
+            return 0
+        fi
     fi
 
-    _th_now=$(epoch)
-    _th_ok=$(last_ok "$_th_name")
+    _th_now=${NOW:-}
+    [ -n "$_th_now" ] || _th_now=$(epoch)
+    last_ok "$_th_name"
+    _th_ok=$REPLY
     _th_kind=""
     _th_msg=""
-    _th_f="$OUTCOME_DIR/$(safe_name "$_th_name")"
+    _th_f="$OUTCOME_DIR/${_th_name//[!A-Za-z0-9._-]/_}"
     if [ -f "$_th_f" ]; then
         IFS="$TAB" read -r _th_kind _th_since _th_msg <"$_th_f" || :
+        _th_msg=${_th_msg//[[:cntrl:]]/}
     fi
-    _th_cd=$(cd_hint "$_th_path")
+    case "$_th_path" in
+        *" "*) _th_cd="cd \"$_th_path\"" ;;
+        *) path_enc_r "$_th_path"; _th_cd="cd $REPLY" ;;
+    esac
     if [ "$t_paused" = "on" ] && [ "$_th_kind" != "conflict" ] && [ "$_th_kind" != "error" ]; then
         H_LEVEL=wait H_TEXT="paused"
         H_FIX="resume: syncto edit $_th_name paused=off"
@@ -1183,7 +1309,8 @@ target_health() {
         offline)
             H_LEVEL=wait H_TEXT="offline, retrying"
             if [ "$_th_ok" -gt 0 ]; then
-                H_DETAIL="last synced $(human_ago $((_th_now - _th_ok))). $_th_msg"
+                human_ago_r $((_th_now - _th_ok))
+                H_DETAIL="last synced $REPLY. $_th_msg"
             else
                 H_DETAIL=$_th_msg
             fi
@@ -1191,18 +1318,21 @@ target_health() {
             ;;
     esac
 
-    if [ "$(last_run "$_th_name")" -eq 0 ]; then
+    last_run "$_th_name"
+    if [ "$REPLY" -eq 0 ]; then
         H_LEVEL=wait H_TEXT="not synced yet"
         return 0
     fi
-    _th_limit=$(stale_limit)
+    stale_limit_r
+    _th_limit=$REPLY
+    human_ago_r $((_th_now - _th_ok))
     if [ "$_th_limit" != "off" ] && [ $((_th_now - _th_ok)) -ge "$_th_limit" ]; then
-        H_LEVEL=warn H_TEXT="no sync for $(human_ago $((_th_now - _th_ok)) | sed 's/ ago$//')"
+        H_LEVEL=warn H_TEXT="no sync for ${REPLY% ago}"
         H_DETAIL="passes keep being skipped (guard, or edits in progress)"
         H_FIX="syncto log"
         return 0
     fi
-    H_LEVEL=ok H_TEXT="synced $(human_ago $((_th_now - _th_ok)))"
+    H_LEVEL=ok H_TEXT="synced $REPLY"
     return 0
 }
 
@@ -1241,17 +1371,22 @@ cmd_status() {
     fi
 
     colors_init
-    _st_cols=${COLUMNS:-$(tput cols 2>/dev/null || printf '100')}
+    NOW=$(epoch)
+    _st_cols=${COLUMNS:-}
+    if [ -z "$_st_cols" ] && [ -t 1 ]; then
+        _st_cols=$(stty size 2>/dev/null || printf '0 100')
+        _st_cols=${_st_cols#* }
+    fi
     case "$_st_cols" in ''|*[!0-9]*) _st_cols=100 ;; esac
 
     _st_w=4
     _st_i=0
     while [ "$_st_i" -lt "$TG_COUNT" ]; do
-        _st_n=$(tg_name "$_st_i")
-        [ "${#_st_n}" -gt "$_st_w" ] && _st_w=${#_st_n}
+        tg_get "$_st_i"
+        [ "${#TGN}" -gt "$_st_w" ] && _st_w=${#TGN}
         _st_i=$((_st_i + 1))
     done
-    _st_pad=$(printf "%$((_st_w + 4))s" "")
+    printf -v _st_pad "%$((_st_w + 4))s" ""
     _st_room=$((_st_cols - _st_w - 4))
     [ "$_st_room" -lt 20 ] && _st_room=20
 
@@ -1259,12 +1394,14 @@ cmd_status() {
     while [ "$_st_i" -lt "$TG_COUNT" ]; do
         target_health "$_st_i"
         level_style "$H_LEVEL"
-        printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$(tg_name "$_st_i")" \
-            "$L_C" "$L_SYM" "$H_TEXT" "$C_OFF" "$H_HOW" "$(path_encode "$(tg_path "$_st_i")")"
+        path_enc_r "$TGP"
+        printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$TGN" \
+            "$L_C" "$L_SYM" "$H_TEXT" "$C_OFF" "$H_HOW" "$REPLY"
         _st_line=$H_DETAIL
         # Long git output is cut to the terminal width; the fix line never is.
-        if [ -t 1 ] && [ "${#_st_line}" -gt "$_st_room" ]; then
-            _st_line="$(printf '%s' "$_st_line" | cut -c1-$((_st_room - 1)))…"
+        if [ -t 1 ]; then
+            fit_r "$_st_line" "$_st_room"
+            _st_line=$REPLY
         fi
         [ -n "$_st_line" ] && printf '%s%s%s%s\n' "$_st_pad" "$C_DIM" "$_st_line" "$C_OFF"
         [ -n "$H_FIX" ] && printf '%sfix: %s\n' "$_st_pad" "$H_FIX"
@@ -1278,9 +1415,22 @@ cmd_status() {
     return 0
 }
 
+# secure_dirs: config and state hold hook commands and git output, so only the
+# owner may read them. Run by start; new installs create them private anyway.
+secure_dirs() {
+    for _sd in "$CONFIG_DIR" "$STATE_DIR"; do
+        [ -d "$_sd" ] && chmod 700 "$_sd" 2>/dev/null
+    done
+    for _sd in "$TARGETS_FILE" "$CONFIG_FILE"; do
+        [ -f "$_sd" ] && chmod 600 "$_sd" 2>/dev/null
+    done
+    return 0
+}
+
 ensure_targets_file() {
     if [ ! -f "$TARGETS_FILE" ]; then
-        mkdir -p "$CONFIG_DIR" || die 3 "cannot create $CONFIG_DIR"
+        # shellcheck disable=SC2174 # only the last folder needs to be private
+        [ -d "$CONFIG_DIR" ] || mkdir -p -m 700 "$CONFIG_DIR" || die 3 "cannot create $CONFIG_DIR"
         {
             printf '# syncto targets\n'
             printf '# NAME<TAB>PATH<TAB>OPTIONS   ($HOME is written as ~ so this file travels)\n'
@@ -1329,7 +1479,13 @@ opts_join() {
 
 # targets_rewrite NAME LINE: replace NAME's line with LINE, or drop it if LINE is empty.
 targets_rewrite() {
-    _tr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
+    # A temp file next to the targets file, renamed over it, so a reader never
+    # sees it half written. A symlinked targets file is rewritten in place.
+    if [ -L "$TARGETS_FILE" ]; then
+        _tr_tmp=$(mktemp "${TMPDIR:-/tmp}/syncto.XXXXXX") || die 1 "cannot create a temp file"
+    else
+        _tr_tmp=$(mktemp "$TARGETS_FILE.XXXXXX") || die 1 "cannot create a temp file"
+    fi
     while IFS= read -r _tr_line || [ -n "$_tr_line" ]; do
         _tr_first=${_tr_line%%"$TAB"*}
         if [ "$_tr_first" = "$1" ] && [ "$_tr_first" != "$_tr_line" ]; then
@@ -1338,8 +1494,13 @@ targets_rewrite() {
         fi
         printf '%s\n' "$_tr_line" >>"$_tr_tmp"
     done <"$TARGETS_FILE"
-    cat "$_tr_tmp" >"$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
-    rm -f "$_tr_tmp"
+    if [ -L "$TARGETS_FILE" ]; then
+        cat "$_tr_tmp" >"$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
+        rm -f "$_tr_tmp"
+    else
+        chmod 600 "$_tr_tmp" 2>/dev/null || :
+        mv -f "$_tr_tmp" "$TARGETS_FILE" || { rm -f "$_tr_tmp"; die 1 "cannot rewrite $TARGETS_FILE"; }
+    fi
 }
 
 cmd_add() {
@@ -1366,6 +1527,8 @@ cmd_add() {
 
     if ! git -C "$_ca_abs" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         warn "$_ca_abs is not a git working tree (yet): adding anyway"
+    elif ! repo_root_ok "$_ca_abs"; then
+        die 3 "$(path_encode "$_ca_abs") is inside the git repo $(path_encode "$_rr_top"); syncto syncs whole repos, so add that folder instead"
     fi
 
     ensure_targets_file
@@ -1433,7 +1596,7 @@ cmd_log() {
         printf 'syncto: no log yet at %s\n' "$(path_encode "$LOG_FILE")" >&2
         return 0
     fi
-    tail -n 100 "$LOG_FILE"
+    tail -n 100 "$LOG_FILE" | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "s/$C1_RE//g"
 }
 
 # ---------------------------------------------------------------------------
@@ -1734,15 +1897,112 @@ sched_exec() {
     fi
 }
 
-# Print the ProgramArguments / ExecStart words, one per line.
-# macOS always goes through $SHELL_BIN: TCC grants (Full Disk Access) attach
-# to the binary launchd exec'd, and a script holds none.
-sched_argv() {
-    _sa_exec=$(sched_exec)
-    if [ ! -x "$_sa_exec" ] || [ "$(uname -s)" = "Darwin" ]; then
-        printf '%s\n' "$SHELL_BIN"
+# macOS privacy grants (Full Disk Access) attach to the program launchd starts.
+# Granting them to /bin/bash would hand them to every LaunchAgent, so syncto
+# builds this launcher once: it stays the started process and runs bash as its
+# child, so a grant can go to it alone.
+LAUNCHER="$HOME/.local/share/syncto/launcher"
+
+launcher_source() {
+    cat <<'EOF'
+#include <errno.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static pid_t child;
+
+static void pass_on(int sig) {
+    if (child > 0) kill(child, sig);
+}
+
+int main(int argc, char **argv) {
+    int status;
+    (void)argc;
+    signal(SIGTERM, pass_on);
+    signal(SIGINT, pass_on);
+    signal(SIGHUP, pass_on);
+    child = fork();
+    if (child < 0) return 1;
+    if (child == 0) {
+        argv[0] = "/bin/bash";
+        execv("/bin/bash", argv);
+        _exit(127);
+    }
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return 1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+}
+EOF
+}
+
+# launcher_build -> 0 if the launcher exists or was built. Needs the developer
+# tools already installed; never triggers Apple's install dialog.
+launcher_build() {
+    [ -x "$LAUNCHER" ] && return 0
+    xcode-select -p >/dev/null 2>&1 || return 1
+    command -v cc >/dev/null 2>&1 || return 1
+    mkdir -p "${LAUNCHER%/*}" || return 1
+    _lb_src=$(mktemp "${TMPDIR:-/tmp}/syncto-launcher.XXXXXX") || return 1
+    launcher_source >"$_lb_src"
+    if cc -x c -O2 -o "$LAUNCHER.tmp" "$_lb_src" >/dev/null 2>&1; then
+        codesign -s - -f -i local.syncto.launcher "$LAUNCHER.tmp" >/dev/null 2>&1 || :
+        mv -f "$LAUNCHER.tmp" "$LAUNCHER"
     fi
-    printf '%s\nrun\n' "$_sa_exec"
+    rm -f "$_lb_src" "$LAUNCHER.tmp"
+    [ -x "$LAUNCHER" ]
+}
+
+# sched_runner -> what launchd or systemd starts in front of the script: the
+# launcher (macOS), /bin/bash (macOS without developer tools, or a script that
+# is not executable), or nothing.
+sched_runner() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if launcher_build; then
+            printf '%s' "$LAUNCHER"
+        else
+            printf '%s' "$SHELL_BIN"
+        fi
+    else
+        # systemd refuses special characters in the program path; as an argument
+        # the escaped path is fine.
+        _sr_exec=$(sched_exec)
+        case "$_sr_exec" in
+            *[!A-Za-z0-9/._+-]*) printf '%s' "$SHELL_BIN" ;;
+            *) [ -x "$_sr_exec" ] || printf '%s' "$SHELL_BIN" ;;
+        esac
+    fi
+}
+
+# Print the ProgramArguments / ExecStart words, one per line.
+sched_argv() {
+    _sa_runner=$(sched_runner)
+    [ -n "$_sa_runner" ] && printf '%s\n' "$_sa_runner"
+    printf '%s\nrun\n' "$(sched_exec)"
+}
+
+# sd_words: lines on stdin -> one ExecStart value, each word quoted for systemd
+# (backslash, quote, % specifiers and $ variables escaped).
+sd_words() {
+    _sw_q='"'
+    _sw_out=""
+    while IFS= read -r _sw; do
+        [ -n "$_sw" ] || continue
+        _sw=${_sw//\\/\\\\}
+        _sw=${_sw//$_sw_q/\\$_sw_q}
+        _sw=${_sw//%/%%}
+        _sw=${_sw//\$/\$\$}
+        _sw_out="$_sw_out $_sw_q$_sw$_sw_q"
+    done
+    printf '%s' "${_sw_out# }"
+}
+
+# sched_runner_line: sched_runner on a line of its own, or nothing
+sched_runner_line() {
+    _srl=$(sched_runner)
+    [ -n "$_srl" ] && printf '%s\n' "$_srl"
+    return 0
 }
 
 plist_path() {
@@ -1802,7 +2062,7 @@ install_launchd() {
             printf '%s\n' '<dict>'
             printf '    <key>Label</key>\n    <string>%s-watch</string>\n' "$(xml_escape "$SYNCTO_LABEL")"
             printf '    <key>ProgramArguments</key>\n    <array>\n'
-            printf '        <string>%s</string>\n' "$(xml_escape "$SHELL_BIN")"
+            printf '        <string>%s</string>\n' "$(xml_escape "$(sched_runner)")"
             printf '        <string>%s</string>\n' "$(xml_escape "$(sched_exec)")"
             printf '        <string>watch</string>\n'
             printf '    </array>\n'
@@ -1882,12 +2142,7 @@ install_systemd() {
     mkdir -p "$_is_dir" || die 1 "cannot create $_is_dir"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || :
 
-    _is_argv=""
-    while IFS= read -r _is_a; do
-        _is_argv="$_is_argv \"$_is_a\""
-    done <<EOF
-$(sched_argv)
-EOF
+    _is_argv=$(sched_argv | sd_words)
     cat >"$_is_dir/syncto.service" <<EOF || die 1 "cannot write $_is_dir/syncto.service"
 [Unit]
 Description=syncto scheduled sync pass
@@ -1896,7 +2151,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${_is_argv# }
+ExecStart=$_is_argv
 EOF
 
     cat >"$_is_dir/syncto.timer" <<EOF || die 1 "cannot write $_is_dir/syncto.timer"
@@ -1924,7 +2179,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$(sched_exec) watch
+ExecStart=$( { sched_runner_line; sched_exec; printf "\nwatch\n"; } | sd_words)
 Restart=always
 RestartSec=5
 
@@ -1983,6 +2238,7 @@ uninstall_systemd() {
 }
 
 cmd_start() {
+    secure_dirs
     case "$(uname -s)" in
         Darwin) install_launchd ;;
         Linux) install_systemd ;;
@@ -2001,6 +2257,19 @@ cmd_stop() {
 # ---------------------------------------------------------------------------
 # dashboard
 # ---------------------------------------------------------------------------
+
+# The logo: a sync loop and the name. Kept in parts, so it is never cut mid-character.
+LOGO_A1='╭──▶╮' LOGO_B1='┌─┐┬ ┬┌┐┌┌─┐┌┬┐┌─┐'
+LOGO_A2='│ ● │' LOGO_B2='└─┐└┬┘││││   │ │ │'
+LOGO_A3='╰◀──╯' LOGO_B3='└─┘ ┴ ┘└┘└─┘ ┴ └─┘'
+
+# logo_r [TEXT2 [TEXT3]]: REPLY is the three logo lines, TEXT2 and TEXT3 beside
+# its second and third line. Uses the C_* colours set by colors_init.
+logo_r() {
+    REPLY="${C_OK}${LOGO_A1}${C_OFF}  ${C_BOLD}${LOGO_B1}${C_OFF}
+${C_OK}${LOGO_A2}${C_OFF}  ${C_BOLD}${LOGO_B2}${C_OFF}${1:+   $1}
+${C_OK}${LOGO_A3}${C_OFF}  ${C_BOLD}${LOGO_B3}${C_OFF}${2:+   $2}"
+}
 
 # colors_init: C_* escapes when stdout is a colour terminal, else empty.
 colors_init() {
@@ -2034,14 +2303,20 @@ background_words() {
 
 # fit TEXT WIDTH -> TEXT cut to WIDTH characters, ending in … when cut
 fit() {
+    fit_r "$1" "$2"
+    printf '%s' "$REPLY"
+}
+
+# fit_r TEXT WIDTH: REPLY is fit's answer, without a subshell.
+fit_r() {
     if [ "$2" -lt 1 ]; then
-        return 0
+        REPLY=""
+    elif [ "${#1}" -le "$2" ]; then
+        REPLY=$1
     elif [ "$2" -lt 2 ]; then
-        printf '%s' "${1:0:$2}"
-    elif [ "${#1}" -gt "$2" ]; then
-        printf '%s…' "${1:0:$(($2 - 1))}"
+        REPLY=${1:0:$2}
     else
-        printf '%s' "$1"
+        REPLY="${1:0:$(($2 - 1))}…"
     fi
 }
 
@@ -2066,6 +2341,21 @@ opt_is_set() {
     split_opts "$1" | grep -q "^$2="
 }
 
+# url_safe_r URL: REPLY is URL without user:password@, safe to show on screen.
+url_safe_r() {
+    REPLY=$1
+    case "$1" in
+        *://*@*)
+            _us_rest=${1#*://}
+            _us_auth=${_us_rest%%@*}
+            case "$_us_auth" in
+                */*) : ;;
+                *) REPLY="${1%%://*}://${_us_rest#*@}" ;;
+            esac
+            ;;
+    esac
+}
+
 dash_can_run() {
     [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]
 }
@@ -2077,7 +2367,7 @@ dash_enter() {
     trap 'dash_leave; exit 130' INT TERM
     trap 'dash_leave' EXIT
     # A resize interrupts the key wait, and every frame re-reads the size.
-    trap ':' WINCH
+    trap 'D_RESIZED=1' WINCH
 }
 
 dash_leave() {
@@ -2089,6 +2379,8 @@ dash_leave() {
 }
 
 dash_size() {
+    [ "${D_RESIZED:-1}" -eq 1 ] || return 0
+    D_RESIZED=0
     # stty reads the terminal on stdin; tput inside $(...) can miss it.
     _ds_size=$(stty size 2>/dev/null || printf '24 80')
     D_LINES=${_ds_size% *}
@@ -2098,7 +2390,8 @@ dash_size() {
     # A pty created without a size reports 0 0.
     [ "$D_COLS" -lt 20 ] && D_COLS=80
     [ "$D_LINES" -lt 8 ] && D_LINES=24
-    D_SEP=$(printf '─%.0s' $(seq 1 "$D_COLS"))
+    printf -v D_SEP '%*s' "$D_COLS" ""
+    D_SEP=${D_SEP// /─}
 }
 
 # dash_key: waits up to D_TICK seconds and sets D_KEY to up, down, left, right,
@@ -2153,25 +2446,32 @@ dash_finish() {
     while [ "$D_FL" -lt $((D_LINES - 2)) ]; do
         dash_add_line ""
     done
-    dash_add_line " ${D_MSG:+$C_BOLD$(fit "$D_MSG" $((D_COLS - 2)))$C_OFF}"
-    D_FRAME="$D_FRAME $C_DIM$(fit "$1" $((D_COLS - 2)))$C_OFF"
+    fit_r "$D_MSG" $((D_COLS - 2))
+    dash_add_line " ${D_MSG:+$C_BOLD$REPLY$C_OFF}"
+    fit_r "$1" $((D_COLS - 2))
+    D_FRAME="$D_FRAME $C_DIM$REPLY$C_OFF"
     dash_paint
 }
 
 dash_header() {
     D_FRAME=""
     D_FL=0
-    _dh_right=$2
-    _dh_vis=$(printf '%s' "$_dh_right" | sed $'s/\033\\[[0-9;]*m//g')
+    _dh_vis=$2
+    for _dh_c in "$C_OK" "$C_WAIT" "$C_WARN" "$C_BAD" "$C_DIM" "$C_OFF" "$C_BOLD" "$C_REV"; do
+        [ -n "$_dh_c" ] && _dh_vis=${_dh_vis//"$_dh_c"/}
+    done
     _dh_room=$((D_COLS - ${#_dh_vis} - 3))
     [ "$_dh_room" -lt 1 ] && _dh_room=1
-    dash_add_line " $C_BOLD$(printf "%-${_dh_room}s" "$(fit "$1" "$_dh_room")")$C_OFF $_dh_right"
+    fit_r "$1" "$_dh_room"
+    printf -v _dh_left "%-${_dh_room}s" "$REPLY"
+    dash_add_line " $C_BOLD$_dh_left$C_OFF $2"
     dash_add_line "$C_DIM$D_SEP$C_OFF"
 }
 
 # dash_refresh: health of every target into D_* variables
 dash_refresh() {
     targets_load
+    NOW=$(epoch)
     D_N=$TG_COUNT
     [ "$D_SEL" -ge "$D_N" ] && D_SEL=$((D_N - 1))
     [ "$D_SEL" -lt 0 ] && D_SEL=0
@@ -2181,19 +2481,30 @@ dash_refresh() {
         eval "D_LV_$_dr_i=\$H_LEVEL D_TX_$_dr_i=\$H_TEXT D_DT_$_dr_i=\$H_DETAIL D_FX_$_dr_i=\$H_FIX D_HW_$_dr_i=\$H_HOW"
         _dr_i=$((_dr_i + 1))
     done
-    D_BG=$(background_state)
+    # launchctl and systemctl are slow: ask at most every 30 s unless forced.
+    if [ "${1:-}" = "all" ] || [ $((NOW - ${D_BG_AT:-0})) -ge 30 ]; then
+        D_BG=$(background_state)
+        D_BG_AT=$NOW
+    fi
+    NOW=""
 }
 
 # dash_rows INDEX -> screen lines target INDEX takes in the list
 dash_rows() {
+    dash_rows_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# dash_rows_r INDEX: REPLY is dash_rows' answer, without a subshell.
+dash_rows_r() {
     eval "_dr_lv=\$D_LV_$1 _dr_dt=\$D_DT_$1 _dr_fx=\$D_FX_$1"
-    _dr_r=1
+    REPLY=1
     # shellcheck disable=SC2154 # set by eval
     if [ "$_dr_lv" = "bad" ] || [ "$_dr_lv" = "warn" ]; then
-        [ -n "$_dr_dt" ] && _dr_r=$((_dr_r + 1))
-        [ -n "$_dr_fx" ] && _dr_r=$((_dr_r + 1))
+        [ -n "$_dr_dt" ] && REPLY=$((REPLY + 1))
+        [ -n "$_dr_fx" ] && REPLY=$((REPLY + 1))
     fi
-    printf '%s' "$_dr_r"
+    return 0
 }
 
 dash_draw_list() {
@@ -2201,6 +2512,13 @@ dash_draw_list() {
     if [ "$D_N" -eq 1 ]; then _dl_count="1 repo"; else _dl_count="$D_N repos"; fi
     dash_header "syncto" "$_dl_count"
     if [ "$D_N" -eq 0 ]; then
+        dash_add_line ""
+        logo_r "v$SYNCTO_VERSION" "keeps git repos in sync by themselves"
+        while IFS= read -r _dl_l; do
+            dash_add_line "   $_dl_l"
+        done <<EOF
+$REPLY
+EOF
         dash_add_line ""
         dash_add_line "   No repos yet. Press a to add one, or ? to see how syncto works."
         dash_add_line ""
@@ -2212,11 +2530,11 @@ dash_draw_list() {
     _dl_w=4
     _dl_i=0
     while [ "$_dl_i" -lt "$D_N" ]; do
-        _dl_n=$(tg_name "$_dl_i")
-        [ "${#_dl_n}" -gt "$_dl_w" ] && _dl_w=${#_dl_n}
+        tg_get "$_dl_i"
+        [ "${#TGN}" -gt "$_dl_w" ] && _dl_w=${#TGN}
         _dl_i=$((_dl_i + 1))
     done
-    _dl_pad=$(printf "%$((_dl_w + 5))s" "")
+    printf -v _dl_pad "%$((_dl_w + 5))s" ""
     _dl_room=$((D_COLS - _dl_w - 6))
 
     # Scroll so the selected row is on screen.
@@ -2226,7 +2544,8 @@ dash_draw_list() {
         _dl_used=0
         _dl_i=$D_TOP
         while [ "$_dl_i" -le "$D_SEL" ]; do
-            _dl_used=$((_dl_used + $(dash_rows "$_dl_i")))
+            dash_rows_r "$_dl_i"
+            _dl_used=$((_dl_used + REPLY))
             _dl_i=$((_dl_i + 1))
         done
         if [ "$_dl_used" -le "$_dl_avail" ] || [ "$D_TOP" -ge "$D_SEL" ]; then
@@ -2235,25 +2554,34 @@ dash_draw_list() {
         D_TOP=$((D_TOP + 1))
     done
 
+    _dl_rest=$((D_COLS - _dl_w - 44))
+    [ "$_dl_rest" -lt 1 ] && _dl_rest=1
     _dl_i=$D_TOP
     while [ "$_dl_i" -lt "$D_N" ] && [ "$D_FL" -lt $((D_LINES - 4)) ]; do
         eval "_dl_lv=\$D_LV_$_dl_i _dl_tx=\$D_TX_$_dl_i _dl_dt=\$D_DT_$_dl_i _dl_fx=\$D_FX_$_dl_i _dl_hw=\$D_HW_$_dl_i"
         # shellcheck disable=SC2154 # set by eval
         level_style "$_dl_lv"
-        _dl_name=$(printf "%-${_dl_w}s" "$(tg_name "$_dl_i")")
+        tg_get "$_dl_i"
+        printf -v _dl_name "%-${_dl_w}s" "$TGN"
         if [ "$_dl_i" -eq "$D_SEL" ]; then
             _dl_mark="▸" _dl_name="$C_REV$_dl_name$C_OFF"
         else
             _dl_mark=" "
         fi
-        _dl_path=$(path_encode "$(tg_path "$_dl_i")")
-        _dl_rest=$((D_COLS - _dl_w - 44))
-        [ "$_dl_rest" -lt 1 ] && _dl_rest=1
         # shellcheck disable=SC2154 # set by eval
-        dash_add_line " $_dl_mark $_dl_name  $L_C$L_SYM $(printf '%-20s' "$_dl_tx")$C_OFF $(printf '%-15s' "$_dl_hw") $C_DIM$(fit "$_dl_path" "$_dl_rest")$C_OFF"
+        printf -v _dl_cols '%-20s%s %-15s' "$_dl_tx" "$C_OFF" "$_dl_hw"
+        path_enc_r "$TGP"
+        fit_r "$REPLY" "$_dl_rest"
+        dash_add_line " ${_dl_mark} $_dl_name  $L_C$L_SYM $_dl_cols $C_DIM$REPLY$C_OFF"
         if [ "$_dl_lv" = "bad" ] || [ "$_dl_lv" = "warn" ]; then
-            [ -n "$_dl_dt" ] && dash_add_line "$_dl_pad$C_DIM$(fit "$_dl_dt" "$_dl_room")$C_OFF"
-            [ -n "$_dl_fx" ] && dash_add_line "${_dl_pad}fix: $(fit "$_dl_fx" $((_dl_room - 5)))"
+            if [ -n "$_dl_dt" ]; then
+                fit_r "$_dl_dt" "$_dl_room"
+                dash_add_line "$_dl_pad$C_DIM$REPLY$C_OFF"
+            fi
+            if [ -n "$_dl_fx" ]; then
+                fit_r "$_dl_fx" $((_dl_room - 5))
+                dash_add_line "${_dl_pad}fix: $REPLY"
+            fi
         fi
         _dl_i=$((_dl_i + 1))
     done
@@ -2290,6 +2618,7 @@ dash_confirm() {
 # dash_do MESSAGE CMD...: runs a syncto action in a subshell so its errors
 # cannot end the dashboard; sets D_MSG to MESSAGE or to the first error line.
 dash_do() {
+    D_BG_AT=0
     _dd_msg=$1
     shift
     _dd_out=$( ("$@") 2>&1 ) && _dd_rc=0 || _dd_rc=$?
@@ -2386,6 +2715,8 @@ dash_add() {
     fi
     _da_url=""
     [ -n "$_da_remote" ] && _da_url=$(git -C "$_da_path" remote get-url "$_da_remote" 2>/dev/null || printf '')
+    url_safe_r "$_da_url"
+    _da_url=$REPLY
 
     dash_header "Add a repo" ""
     dash_add_line ""
@@ -2405,8 +2736,11 @@ dash_add() {
     else
         _da_opts="watch=off"
     fi
-    [ -n "$_da_branch" ] && [ "$_da_branch" != "$G_BRANCH" ] && _da_opts="$_da_opts,branch=$_da_branch"
-    [ -n "$_da_remote" ] && [ "$_da_remote" != "$G_REMOTE" ] && _da_opts="$_da_opts,remote=$_da_remote"
+    # Branch and remote names come from the repo: escape commas so neither can add options.
+    [ -n "$_da_branch" ] && [ "$_da_branch" != "$G_BRANCH" ] &&
+        _da_opts="$_da_opts,branch=${_da_branch//,/\\,}"
+    [ -n "$_da_remote" ] && [ "$_da_remote" != "$G_REMOTE" ] &&
+        _da_opts="$_da_opts,remote=${_da_remote//,/\\,}"
     if dash_do "Added $_da_name." cmd_add "$_da_name" "$_da_path" "$_da_opts"; then
         dash_refresh
         _da_i=0
@@ -2577,6 +2911,8 @@ dash_details() {
         _dt_path=$(tg_path "$_dt_i")
         dash_header "$_dt_name" "$L_C$L_SYM $H_TEXT$C_OFF"
         _dt_url=$(git -C "$_dt_path" remote get-url "$t_remote" 2>/dev/null || printf 'not set up')
+        url_safe_r "$_dt_url"
+        _dt_url=$REPLY
         case "$t_mode" in
             push) _dt_dir="push only, never pulls" ;;
             pull) _dt_dir="pull only, never commits" ;;
@@ -2615,6 +2951,7 @@ dash_details() {
                 _dt_ts=${_dt_l%% *}
                 _dt_msg=${_dt_l#*msg=\"}
                 _dt_msg=${_dt_msg%\"}
+                _dt_msg=${_dt_msg//[[:cntrl:]]/}
                 case "$_dt_msg" in
                     "sync ok ("*"committed=1"*) _dt_msg="synced: committed and pushed" ;;
                     "sync ok ("*"pulled=0"*) _dt_msg="synced: pushed, pull left for later" ;;
@@ -2623,7 +2960,7 @@ dash_details() {
                 esac
                 dash_add_line "   $C_DIM${_dt_ts:5:5} ${_dt_ts:11:5}$C_OFF  $(fit "$_dt_msg" $((D_COLS - 16)))"
             done <<EOF
-$(grep -F " target=$_dt_name msg=" "$LOG_FILE" 2>/dev/null | tail -n "$_dt_room")
+$(awk -v t="target=$_dt_name" '$3 == t' "$LOG_FILE" 2>/dev/null | tail -n "$_dt_room")
 EOF
         fi
         dash_finish "e edit  s sync now  p pause  x remove  ← back"
@@ -2649,6 +2986,13 @@ EOF
 dash_help() {
     dash_size
     dash_header "How syncto works" ""
+    dash_add_line ""
+    logo_r "v$SYNCTO_VERSION" "keeps git repos in sync by themselves"
+    while IFS= read -r _hl; do
+        dash_add_line "   $_hl"
+    done <<EOF
+$REPLY
+EOF
     dash_add_line ""
     dash_add_line "   Each repo is a git folder with a remote. A sync commits your changes,"
     dash_add_line "   pulls with rebase and pushes. Background syncing (b) runs it on a"
@@ -2713,8 +3057,10 @@ cmd_dashboard() {
 # ---------------------------------------------------------------------------
 
 usage() {
+    colors_init
+    logo_r "v$SYNCTO_VERSION" "keeps git repos in sync by themselves: commit, pull, push"
     cat <<EOF
-syncto $SYNCTO_VERSION: keeps git repos in sync by itself (commit, pull, push)
+$REPLY
 
 USAGE
   syncto [-v] [COMMAND]
@@ -2788,6 +3134,8 @@ EOF
 # ---------------------------------------------------------------------------
 
 main() {
+    # shellcheck disable=SC2174 # only the last folder needs to be private
+    [ -d "$STATE_DIR" ] || mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || :
     load_config
     log_rotate_maybe
     setup_git_env

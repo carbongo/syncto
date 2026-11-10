@@ -30,7 +30,7 @@ fi
 for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.profile"; do
   [ -f "$rc" ] || continue
   grep -Fq "$PATH_MARKER" "$rc" 2>/dev/null || continue
-  tmp="$rc.syncto-uninstall.tmp"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/syncto-uninstall.XXXXXX") || exit 1
   # Drop the PATH marker, its export line and the blank line install.sh added.
   awk -v marker="$PATH_MARKER" -v pathline="$PATH_LINE" '
     { lines[NR] = $0 }
@@ -49,7 +49,9 @@ for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOM
       }
     }
   ' "$rc" > "$tmp"
-  mv "$tmp" "$rc"
+  # Write back in place: keeps a symlinked rc file a symlink, and its mode.
+  cat "$tmp" > "$rc"
+  rm -f "$tmp"
   echo "syncto: removed PATH line from $rc"
 done
 

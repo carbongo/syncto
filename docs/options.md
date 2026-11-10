@@ -10,8 +10,8 @@ Options are `key=value`, comma separated; `\,` is a literal comma. Set them per 
 | `paused=on\|off` | skip in background syncing and plain `syncto sync`; `sync NAME` still runs | `off` |
 | `debounce=SECONDS` | quiet time a watcher waits before syncing | `2` |
 | `mode=sync\|push\|pull` | both ways, push only, pull only | `sync` |
-| `branch=NAME` | branch to pull and push | `main` |
-| `remote=NAME` | remote to pull and push | `origin` |
+| `branch=NAME` | branch to pull and push; a plain name, no leading `-`, spaces or commas | `main` |
+| `remote=NAME` | remote to pull and push; same rule as `branch` | `origin` |
 | `prefix=TEXT` | commit message prefix: `TEXT: notes.md`, `TEXT: 3 files` | `syncto` |
 | `guard=CMD` | runs first; non-zero skips this pass quietly | none |
 | `notify=CMD` | runs on a conflict or when a repo goes stale, at most every 30 min | none |
@@ -42,6 +42,6 @@ Global config only: `log=PATH` (`~/.local/state/syncto/syncto.log`) and `log_max
 |---|---|
 | `SYNCTO_NAME`, `SYNCTO_PATH` | the repo's name and absolute path |
 | `SYNCTO_BRANCH`, `SYNCTO_REMOTE` | branch and remote in use |
-| `SYNCTO_MESSAGE` | the commit message, or for `notify=` the problem |
+| `SYNCTO_MESSAGE` | the commit message, or for `notify=` the problem; untrusted text from git, never run it |
 
 Only `guard=`'s exit status matters; `notify=` and `peer=` never fail a sync.
