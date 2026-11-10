@@ -265,6 +265,9 @@ point stderr at the log file, so each line would be written twice.
   can't prompt for a passphrase. Protect that key the way you'd protect any
   passphrase-less key — restrict it to the narrowest scope you can (a deploy key with
   push access to one repo beats a general-purpose personal key).
+- On macOS the launchd units run `/bin/bash syncto.sh`: privacy grants such as Full Disk
+  Access attach to the binary launchd starts, so `/bin/bash` is the one to grant for
+  protected folders like iCloud Drive.
 - Notification and peer-wake hooks (`notify=`, `peer=`) are opaque shell commands
   supplied by the user in their own config; `syncto` has no built-in integration with
   any specific chat/notification service, so no service-specific wiring or credentials

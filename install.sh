@@ -1,13 +1,7 @@
 #!/bin/sh
-# syncto installer — copies syncto.sh into ~/.local/share/syncto, wires up
-# an executable entry point at ~/.local/bin/syncto, seeds a default config,
-# and makes sure ~/.local/bin is on PATH. Safe to re-run (idempotent).
-#
-# Usage:  ./install.sh              install (or re-install)
-#         ./install.sh --uninstall  remove installed files (keeps user config)
-#
-# This script does NOT install any scheduler unit (launchd agent / systemd
-# timer). Run `syncto --install-service` after installing to do that.
+# syncto installer: copies syncto.sh to ~/.local/share/syncto, links
+# ~/.local/bin/syncto, seeds a config and puts ~/.local/bin on PATH. Idempotent.
+# Usage: ./install.sh [--uninstall]. Scheduler units: syncto --install-service
 
 set -eu
 
@@ -20,7 +14,7 @@ CONFIG_FILE="$CONFIG_DIR/config"
 PATH_MARKER="# added by syncto installer"
 PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
 
 usage() {
   cat <<EOF
@@ -63,8 +57,7 @@ for arg in "$@"; do
   esac
 done
 
-# OS detection — informational only; no behavior currently branches on it
-# besides rc_file() above, but keeping it explicit helps future maintenance.
+# Warn on an OS syncto is not tested on.
 os=$(uname -s 2>/dev/null || echo unknown)
 case "$os" in
   Darwin|Linux) : ;;
@@ -93,7 +86,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     echo "syncto: seeded $CONFIG_FILE from config.example"
   else
     cat > "$CONFIG_FILE" <<EOF
-# syncto global config — key=value, one per line.
+# syncto global config: key=value, one per line.
 interval=120
 watch=off
 mode=sync
