@@ -1192,6 +1192,38 @@ test_control_characters() {
     esac
 }
 
+test_subfolder_target() {
+    _t_sb=$(new_sandbox)
+    _t_outer="$_t_sb/home/outer"
+    mkdir -p "$_t_outer/notes" "$_t_outer/.ssh"
+    git_q "$_t_outer" init
+    git_q "$_t_outer" checkout -B main
+    git_q "$_t_outer" commit --allow-empty -m init
+    git -C "$_t_outer" config user.email t@example.invalid
+    git -C "$_t_outer" config user.name t
+    printf 'secret\n' >"$_t_outer/.ssh/id_test"
+    printf 'note\n' >"$_t_outer/notes/a.md"
+    run_syncto "$_t_sb" add notes "$_t_outer/notes"
+    case "$RC:$OUT" in
+        3:*"inside the git repo"*) ok "subfolder: add refuses a folder inside a repo" ;;
+        *) fail "subfolder: add refuses a folder inside a repo" "$RC $OUT" ;;
+    esac
+    mkdir -p "$_t_sb/home/.config/syncto"
+    printf 'notes\t%s\tbranch=main\n' "$_t_outer/notes" >"$_t_sb/home/.config/syncto/targets"
+    run_syncto "$_t_sb" sync notes
+    assert_status "subfolder: sync refuses it with exit 3" 3 "$RC" "$OUT"
+    if [ "$(git -C "$_t_outer" rev-list --count HEAD)" = "1" ]; then
+        ok "subfolder: nothing in the enclosing repo is committed"
+    else
+        fail "subfolder: nothing in the enclosing repo is committed" "$(git -C "$_t_outer" log --stat -1)"
+    fi
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"inside another repo"*) ok "status: a subfolder says it is inside another repo" ;;
+        *) fail "status: a subfolder says it is inside another repo" "$OUT" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
@@ -1203,6 +1235,7 @@ test_dashboard
 test_start_reloads
 test_branch_remote_values
 test_control_characters
+test_subfolder_target
 test_sync_basic
 test_conflict
 test_network_error_not_conflict

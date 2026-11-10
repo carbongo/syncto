@@ -2,7 +2,7 @@
 
 1. **Lock**: `mkdir` a per-repo lock; if another run holds it, exit 4. A lock older than
    10 × `interval` is taken over.
-2. **Check** the folder exists and is a git repo, else exit 3.
+2. **Check** the folder exists and is the top folder of a git repo, else exit 3.
 3. **Guard**: `guard=` exiting non-zero skips this pass, not an error.
 4. **Refuse** a repo mid-rebase or mid-merge, or with a detached HEAD: needs you.
 5. **Commit**: `git add -A`, then `PREFIX: file` or `PREFIX: N files`.

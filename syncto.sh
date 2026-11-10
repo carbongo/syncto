@@ -663,6 +663,13 @@ git_in() {
     git -C "$_gi_path" "$@" </dev/null
 }
 
+# repo_root_ok PATH -> 0 if PATH is the top folder of its git work tree; sets _rr_top
+repo_root_ok() {
+    _rr_top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+    _rr_here=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+    [ "$_rr_top" = "$_rr_here" ]
+}
+
 # sync_one INDEX -> exit code for that target
 sync_one() {
     _s_i=$1
@@ -687,6 +694,12 @@ sync_one() {
     fi
     if ! git_in "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         outcome "$name" error "not a git working tree: $path"
+        lock_release
+        return 3
+    fi
+    # git add -A stages the whole work tree, so a subfolder would sync its parent repo.
+    if [ ! -e "$path/.git" ] && ! repo_root_ok "$path"; then
+        outcome "$name" error "not the top folder of its git repo: $path"
         lock_release
         return 3
     fi
@@ -1176,9 +1189,18 @@ target_health() {
         H_LEVEL=bad H_TEXT="folder is missing" H_FIX="restore it, or: syncto remove $_th_name"
         return 0
     fi
-    if [ ! -e "$_th_path/.git" ] && ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        H_LEVEL=bad H_TEXT="not a git repo" H_FIX="git init it, or: syncto remove $_th_name"
-        return 0
+    if [ ! -e "$_th_path/.git" ]; then
+        if ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            H_LEVEL=bad H_TEXT="not a git repo" H_FIX="git init it, or: syncto remove $_th_name"
+            return 0
+        fi
+        if ! repo_root_ok "$_th_path"; then
+            path_enc_r "$_rr_top"
+            H_LEVEL=bad H_TEXT="inside another repo"
+            H_DETAIL="syncto syncs whole repos, and this folder is part of $REPLY"
+            H_FIX="sync $REPLY instead, or: syncto remove $_th_name"
+            return 0
+        fi
     fi
 
     _th_now=${NOW:-}
@@ -1438,6 +1460,8 @@ cmd_add() {
 
     if ! git -C "$_ca_abs" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         warn "$_ca_abs is not a git working tree (yet): adding anyway"
+    elif ! repo_root_ok "$_ca_abs"; then
+        die 3 "$(path_encode "$_ca_abs") is inside the git repo $(path_encode "$_rr_top"); syncto syncs whole repos, so add that folder instead"
     fi
 
     ensure_targets_file
