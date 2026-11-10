@@ -4,7 +4,7 @@
 
 set -eu
 
-SYNCTO_VERSION="0.2.0"
+SYNCTO_VERSION="1.0.0"
 SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ case "$SELF" in
 esac
 
 VERBOSE=0
-# 1 under -d/-w: the units already send stderr to LOG_FILE.
+# 1 under run and watch: the units already send stderr to LOG_FILE.
 DAEMON=0
 HELD_LOCK=""
 
