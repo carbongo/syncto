@@ -1,6 +1,6 @@
 # One sync, step by step
 
-1. **Lock**: `mkdir` a per-repo lock; if another run holds it, exit 4. The lock is taken
+1. **Lock**: create a per-repo lock file atomically; if another run holds it, exit 4. It is taken
    over when its owner process is gone, or has held it over 10 × `interval` (at least 1 h).
 2. **Check** the folder exists and is the top folder of a git repo, else exit 3.
 3. **Guard**: `guard=` exiting non-zero skips this pass, not an error.

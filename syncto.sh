@@ -516,23 +516,37 @@ safe_name() {
     printf '%s' "${1//[!A-Za-z0-9._-]/_}"
 }
 
+# Locks are files created with O_EXCL through bash's noclobber, which is atomic
+# on every filesystem; mkdir is not atomic in every coreutils (uutils races).
+# lock_create FILE -> 0 if this run created FILE, holding "PID EPOCH".
+lock_create() {
+    set -C
+    { printf '%s %s\n' "$$" "$(epoch)" >"$1"; } 2>/dev/null
+    _lc_rc=$?
+    set +C
+    return "$_lc_rc"
+}
+
 lock_acquire() {
     # lock_acquire NAME STALE_AFTER_SECONDS -> 0 acquired, 1 held by another run
-    _la_dir="$LOCK_DIR/${1//[!A-Za-z0-9._-]/_}.lock"
+    _la_file="$LOCK_DIR/${1//[!A-Za-z0-9._-]/_}.pid"
     _la_stale=$2
     [ "$_la_stale" -lt 3600 ] && _la_stale=3600
     mkdir -p "$LOCK_DIR" 2>/dev/null || :
-    lock_take "$_la_dir" && return 0
+    if lock_create "$_la_file"; then
+        HELD_LOCK=$_la_file
+        return 0
+    fi
     _la_owner=""
-    { read -r _la_owner || :; } <"$_la_dir/owner" 2>/dev/null
+    { read -r _la_owner || :; } 2>/dev/null <"$_la_file"
     _la_pid=${_la_owner%% *}
     _la_started=${_la_owner#* }
     case "$_la_pid" in ''|*[!0-9]*) _la_pid="" ;; esac
     case "$_la_started" in ''|*[!0-9]*) _la_started=0 ;; esac
     if [ -z "$_la_pid" ]; then
-        # No owner yet: another run is between mkdir and writing it. Only a
-        # lock left like that for over a minute is abandoned.
-        [ -n "$(find "$_la_dir" -prune -mmin +1 2>/dev/null)" ] || return 1
+        # Empty: another run is between creating and filling it. Only a lock
+        # left like that for over a minute is abandoned.
+        [ -n "$(find "$_la_file" -mmin +1 2>/dev/null)" ] || return 1
         _la_why="it had no owner"
     elif kill -0 "$_la_pid" 2>/dev/null; then
         # A live owner keeps it, unless it has held it far too long (a hung
@@ -542,32 +556,36 @@ lock_acquire() {
     else
         _la_why="run $_la_pid is gone"
     fi
-    # Take it over by renaming: of several racing runs only one can.
+    # One takeover at a time, and only of the lock judged stale: without this,
+    # a slower run could remove the fresh lock a faster one just took.
+    if ! lock_create "$_la_file.takeover"; then
+        # Left behind by a run that died mid-takeover.
+        [ -n "$(find "$_la_file.takeover" -mmin +1 2>/dev/null)" ] &&
+            rm -f "$_la_file.takeover"
+        return 1
+    fi
     _la_now=""
-    { read -r _la_now || :; } <"$_la_dir/owner" 2>/dev/null
-    [ "$_la_now" = "$_la_owner" ] || return 1
-    mv "$_la_dir" "$_la_dir.stale.$$" 2>/dev/null || return 1
-    rm -rf "$_la_dir.stale.$$" 2>/dev/null || :
-    log warn "$1" "took over a stale lock: $_la_why"
-    lock_take "$_la_dir"
-}
-
-# lock_take DIR -> 0 if this run created DIR; its owner file appears atomically.
-lock_take() {
-    mkdir "$1" 2>/dev/null || return 1
-    printf '%s %s\n' "$$" "$(epoch)" >"$1/.owner.$$" 2>/dev/null &&
-        mv "$1/.owner.$$" "$1/owner" 2>/dev/null
-    HELD_LOCK=$1
-    return 0
+    { read -r _la_now || :; } 2>/dev/null <"$_la_file"
+    _la_rc=1
+    if [ "$_la_now" = "$_la_owner" ]; then
+        rm -f "$_la_file"
+        if lock_create "$_la_file"; then
+            HELD_LOCK=$_la_file
+            log warn "$1" "took over a stale lock: $_la_why"
+            _la_rc=0
+        fi
+    fi
+    rm -f "$_la_file.takeover"
+    return "$_la_rc"
 }
 
 # lock_release: removes the lock only while this run still owns it.
 lock_release() {
     if [ -n "$HELD_LOCK" ]; then
         _lr_owner=""
-        { read -r _lr_owner || :; } <"$HELD_LOCK/owner" 2>/dev/null
+        { read -r _lr_owner || :; } 2>/dev/null <"$HELD_LOCK"
         if [ "${_lr_owner%% *}" = "$$" ]; then
-            rm -rf "$HELD_LOCK" 2>/dev/null || :
+            rm -f "$HELD_LOCK"
         fi
         HELD_LOCK=""
     fi
