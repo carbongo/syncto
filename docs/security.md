@@ -11,3 +11,5 @@
   service itself.
 - On macOS, Full Disk Access goes only to syncto's launcher, never to `/bin/bash`
   ([why](scheduling.md#macos-protected-folders)).
+- The curl installer checks every file against the release's `SHA256SUMS` and runs
+  nothing if the download is cut short.

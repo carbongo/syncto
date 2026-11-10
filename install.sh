@@ -6,7 +6,13 @@
 set -eu
 
 PROG_NAME="syncto"
-RELEASE_URL="https://github.com/carbongo/syncto/releases/latest/download"
+# The release workflow pins this to the release's own tag.
+SYNCTO_TAG=latest
+if [ "$SYNCTO_TAG" = "latest" ]; then
+  RELEASE_URL="https://github.com/carbongo/syncto/releases/latest/download"
+else
+  RELEASE_URL="https://github.com/carbongo/syncto/releases/download/$SYNCTO_TAG"
+fi
 SHARE_DIR="$HOME/.local/share/$PROG_NAME"
 BIN_DIR="$HOME/.local/bin"
 BIN_PATH="$BIN_DIR/$PROG_NAME"
@@ -50,6 +56,16 @@ do_uninstall() {
   exit 1
 }
 
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# All work is inside main, called on the last line: a download cut short runs nothing.
+main() {
 for arg in "$@"; do
   case "$arg" in
     --uninstall) do_uninstall ;;
@@ -69,11 +85,18 @@ esac
 if [ -z "$script_dir" ] || [ ! -f "$script_dir/syncto.sh" ]; then
   script_dir=$(mktemp -d) || exit 1
   trap 'rm -rf "$script_dir"' EXIT
-  for f in syncto.sh config.example; do
-    curl -fsSL "$RELEASE_URL/$f" -o "$script_dir/$f" || {
+  for f in SHA256SUMS syncto.sh config.example; do
+    curl --proto '=https' --tlsv1.2 -fsSL "$RELEASE_URL/$f" -o "$script_dir/$f" || {
       echo "syncto: could not download $RELEASE_URL/$f" >&2
       exit 1
     }
+  done
+  for f in syncto.sh config.example; do
+    want=$(awk -v f="$f" '$2 == f { print $1 }' "$script_dir/SHA256SUMS")
+    if [ -z "$want" ] || [ "$(sha256_of "$script_dir/$f")" != "$want" ]; then
+      echo "syncto: $f does not match the release's SHA256SUMS; not installing" >&2
+      exit 1
+    fi
   done
 fi
 
@@ -123,3 +146,6 @@ Next steps:
      (schedulers have no ssh-agent: if a target pushes over ssh, give it
      a key= option so pushes don't hang)
 EOF
+}
+
+main "$@"
