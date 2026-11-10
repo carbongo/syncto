@@ -1126,6 +1126,41 @@ test_start_reloads() {
 }
 
 # ---------------------------------------------------------------------------
+# security: branch and remote values
+# ---------------------------------------------------------------------------
+
+test_branch_remote_values() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    run_syncto "$_t_sb" add a "$_t_work" "remote=--upload-pack=touch $_t_sb/PWNED"
+    assert_status "values: a remote starting with - is refused" 3 "$RC" "$OUT"
+    run_syncto "$_t_sb" add b "$_t_work" 'branch=main\,guard=touch x'
+    assert_status "values: a branch with a comma is refused" 3 "$RC" "$OUT"
+    run_syncto "$_t_sb" add c "$_t_work" "branch=-x"
+    assert_status "values: a branch starting with - is refused" 3 "$RC" "$OUT"
+
+    # The dashboard's add form takes the branch the clone checked out.
+    if command -v script >/dev/null 2>&1; then
+        _t_evil='main,guard=touch${IFS}'"$_t_sb"'/PWNED'
+        _t_up="$_t_sb/home/up"
+        mkdir -p "$_t_up"
+        git_q "$_t_up" init
+        git_q "$_t_up" checkout -b "$_t_evil"
+        git_q "$_t_up" commit --allow-empty -m init
+        git clone -q "$_t_up" "$_t_sb/home/victim" 2>/dev/null
+        run_in_pty "$_t_sb" "a$_t_sb/home/victim"$'\r\r'nnq
+        run_syncto "$_t_sb" sync
+        if [ -e "$_t_sb/PWNED" ] || grep -q 'guard=' "$_t_sb/home/.config/syncto/targets" 2>/dev/null; then
+            fail "values: a branch name cannot plant a guard through the add form" "$(cat "$_t_sb/home/.config/syncto/targets")"
+        else
+            ok "values: a branch name cannot plant a guard through the add form"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
@@ -1134,6 +1169,7 @@ test_edit_options
 test_paused
 test_dashboard
 test_start_reloads
+test_branch_remote_values
 test_sync_basic
 test_conflict
 test_network_error_not_conflict

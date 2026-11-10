@@ -205,6 +205,15 @@ trim_r() {
 validate_value() {
     # validate_value KEY VALUE -> 0 ok, 1 bad (message on stderr)
     case "$1" in
+        branch|remote)
+            # Passed to git as arguments: no option lookalikes, separators or controls.
+            case "$2" in
+                ''|-*|*[[:space:],]*|*[[:cntrl:]]*)
+                    warn "$1 must be a plain name (no leading '-', spaces, commas or control characters), got '$2'"
+                    return 1
+                    ;;
+            esac
+            ;;
         interval)
             case "$2" in
                 ''|*[!0-9]*) warn "interval must be a whole number of seconds, got '$2'"; return 1 ;;
@@ -2500,8 +2509,11 @@ dash_add() {
     else
         _da_opts="watch=off"
     fi
-    [ -n "$_da_branch" ] && [ "$_da_branch" != "$G_BRANCH" ] && _da_opts="$_da_opts,branch=$_da_branch"
-    [ -n "$_da_remote" ] && [ "$_da_remote" != "$G_REMOTE" ] && _da_opts="$_da_opts,remote=$_da_remote"
+    # Branch and remote names come from the repo: escape commas so neither can add options.
+    [ -n "$_da_branch" ] && [ "$_da_branch" != "$G_BRANCH" ] &&
+        _da_opts="$_da_opts,branch=${_da_branch//,/\\,}"
+    [ -n "$_da_remote" ] && [ "$_da_remote" != "$G_REMOTE" ] &&
+        _da_opts="$_da_opts,remote=${_da_remote//,/\\,}"
     if dash_do "Added $_da_name." cmd_add "$_da_name" "$_da_path" "$_da_opts"; then
         dash_refresh
         _da_i=0
