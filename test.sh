@@ -465,12 +465,47 @@ test_locking() {
     run_syncto "$_t_sb" add work "$_t_work" "branch=main,mode=push,interval=60"
 
     _lock_dir="$_t_sb/home/.local/state/syncto/locks/work.lock"
+
+    # A live owner keeps its lock.
+    sleep 30 &
+    _t_live=$!
     mkdir -p "$_lock_dir"
-    printf '999999 %s\n' "$(date +%s)" >"$_lock_dir/owner"
-
+    printf '%s %s\n' "$_t_live" "$(date +%s)" >"$_lock_dir/owner"
     run_syncto "$_t_sb" sync work
-    assert_status "locking: held lock makes sync exit 4" 4 "$RC" "$OUT"
+    assert_status "locking: a live owner's lock makes sync exit 4" 4 "$RC" "$OUT"
+    kill "$_t_live" 2>/dev/null
+    wait "$_t_live" 2>/dev/null
 
+    # A lock whose owner is still being written is busy, not stale.
+    rm -f "$_lock_dir/owner"
+    run_syncto "$_t_sb" sync work
+    assert_status "locking: a lock with no owner yet makes sync exit 4" 4 "$RC" "$OUT"
+
+    # A dead owner's lock is taken over.
+    sh -c 'exit 0' &
+    _t_dead=$!
+    wait "$_t_dead"
+    printf '%s %s\n' "$_t_dead" "$(date +%s)" >"$_lock_dir/owner"
+    run_syncto "$_t_sb" sync work
+    case "$RC" in
+        4) fail "locking: a dead owner's lock is taken over" "exit 4" ;;
+        *) assert_log "locking: a dead owner's lock is taken over" '*took over a stale lock: run * is gone*' ;;
+    esac
+    if [ -d "$_lock_dir" ]; then
+        fail "locking: the lock is released after the sync" "still there"
+    else
+        ok "locking: the lock is released after the sync"
+    fi
+
+    # Two runs at once: exactly one syncs, the other finds the lock held.
+    run_syncto "$_t_sb" edit work "guard=sleep 2"
+    ( run_syncto "$_t_sb" sync work; echo "$RC" >"$_t_sb/rc1" ) &
+    ( run_syncto "$_t_sb" sync work; echo "$RC" >"$_t_sb/rc2" ) &
+    wait
+    case "$(cat "$_t_sb/rc1")$(cat "$_t_sb/rc2")" in
+        [0-3]4|4[0-3]) ok "locking: of two runs at once one syncs and one exits 4" ;;
+        *) fail "locking: of two runs at once one syncs and one exits 4" "$(cat "$_t_sb/rc1") $(cat "$_t_sb/rc2")" ;;
+    esac
     rm -rf "$_lock_dir"
 }
 

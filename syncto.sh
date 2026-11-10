@@ -511,39 +511,58 @@ safe_name() {
 }
 
 lock_acquire() {
-    # lock_acquire NAME STALE_AFTER_SECONDS -> 0 acquired, 1 held by someone else
-    _la_dir="$LOCK_DIR/$(safe_name "$1").lock"
+    # lock_acquire NAME STALE_AFTER_SECONDS -> 0 acquired, 1 held by another run
+    _la_dir="$LOCK_DIR/${1//[!A-Za-z0-9._-]/_}.lock"
     _la_stale=$2
+    [ "$_la_stale" -lt 3600 ] && _la_stale=3600
     mkdir -p "$LOCK_DIR" 2>/dev/null || :
-    if mkdir "$_la_dir" 2>/dev/null; then
-        printf '%s %s\n' "$$" "$(epoch)" >"$_la_dir/owner" 2>/dev/null || :
-        HELD_LOCK=$_la_dir
-        return 0
+    lock_take "$_la_dir" && return 0
+    _la_owner=""
+    { read -r _la_owner || :; } <"$_la_dir/owner" 2>/dev/null
+    _la_pid=${_la_owner%% *}
+    _la_started=${_la_owner#* }
+    case "$_la_pid" in ''|*[!0-9]*) _la_pid="" ;; esac
+    case "$_la_started" in ''|*[!0-9]*) _la_started=0 ;; esac
+    if [ -z "$_la_pid" ]; then
+        # No owner yet: another run is between mkdir and writing it. Only a
+        # lock left like that for over a minute is abandoned.
+        [ -n "$(find "$_la_dir" -prune -mmin +1 2>/dev/null)" ] || return 1
+        _la_why="it had no owner"
+    elif kill -0 "$_la_pid" 2>/dev/null; then
+        # A live owner keeps it, unless it has held it far too long (a hung
+        # git, or a PID the system has since reused).
+        [ $(( $(epoch) - _la_started )) -gt "$_la_stale" ] || return 1
+        _la_why="run $_la_pid held it over ${_la_stale}s"
+    else
+        _la_why="run $_la_pid is gone"
     fi
-    # Someone holds it. Steal it if it is older than the stale window.
-    _la_started=0
-    if [ -f "$_la_dir/owner" ]; then
-        _la_started=$(awk '{print $2}' "$_la_dir/owner" 2>/dev/null || printf '0')
-    fi
-    case "$_la_started" in
-        ''|*[!0-9]*) _la_started=0 ;;
-    esac
-    _la_age=$(( $(epoch) - _la_started ))
-    if [ "$_la_started" -eq 0 ] || [ "$_la_age" -gt "$_la_stale" ]; then
-        log warn "$1" "stealing stale lock (age ${_la_age}s > ${_la_stale}s)"
-        rm -rf "$_la_dir" 2>/dev/null || :
-        if mkdir "$_la_dir" 2>/dev/null; then
-            printf '%s %s\n' "$$" "$(epoch)" >"$_la_dir/owner" 2>/dev/null || :
-            HELD_LOCK=$_la_dir
-            return 0
-        fi
-    fi
-    return 1
+    # Take it over by renaming: of several racing runs only one can.
+    _la_now=""
+    { read -r _la_now || :; } <"$_la_dir/owner" 2>/dev/null
+    [ "$_la_now" = "$_la_owner" ] || return 1
+    mv "$_la_dir" "$_la_dir.stale.$$" 2>/dev/null || return 1
+    rm -rf "$_la_dir.stale.$$" 2>/dev/null || :
+    log warn "$1" "took over a stale lock: $_la_why"
+    lock_take "$_la_dir"
 }
 
+# lock_take DIR -> 0 if this run created DIR; its owner file appears atomically.
+lock_take() {
+    mkdir "$1" 2>/dev/null || return 1
+    printf '%s %s\n' "$$" "$(epoch)" >"$1/.owner.$$" 2>/dev/null &&
+        mv "$1/.owner.$$" "$1/owner" 2>/dev/null
+    HELD_LOCK=$1
+    return 0
+}
+
+# lock_release: removes the lock only while this run still owns it.
 lock_release() {
     if [ -n "$HELD_LOCK" ]; then
-        rm -rf "$HELD_LOCK" 2>/dev/null || :
+        _lr_owner=""
+        { read -r _lr_owner || :; } <"$HELD_LOCK/owner" 2>/dev/null
+        if [ "${_lr_owner%% *}" = "$$" ]; then
+            rm -rf "$HELD_LOCK" 2>/dev/null || :
+        fi
         HELD_LOCK=""
     fi
     return 0
