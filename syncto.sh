@@ -2240,6 +2240,19 @@ cmd_stop() {
 # dashboard
 # ---------------------------------------------------------------------------
 
+# The logo: a sync loop and the name. Kept in parts, so it is never cut mid-character.
+LOGO_A1='╭──▶╮' LOGO_B1='┌─┐┬ ┬┌┐┌┌─┐┌┬┐┌─┐'
+LOGO_A2='│ ● │' LOGO_B2='└─┐└┬┘││││   │ │ │'
+LOGO_A3='╰◀──╯' LOGO_B3='└─┘ ┴ ┘└┘└─┘ ┴ └─┘'
+
+# logo_r [TEXT2 [TEXT3]]: REPLY is the three logo lines, TEXT2 and TEXT3 beside
+# its second and third line. Uses the C_* colours set by colors_init.
+logo_r() {
+    REPLY="${C_OK}${LOGO_A1}${C_OFF}  ${C_BOLD}${LOGO_B1}${C_OFF}
+${C_OK}${LOGO_A2}${C_OFF}  ${C_BOLD}${LOGO_B2}${C_OFF}${1:+   $1}
+${C_OK}${LOGO_A3}${C_OFF}  ${C_BOLD}${LOGO_B3}${C_OFF}${2:+   $2}"
+}
+
 # colors_init: C_* escapes when stdout is a colour terminal, else empty.
 colors_init() {
     C_OK="" C_WAIT="" C_WARN="" C_BAD="" C_DIM="" C_OFF="" C_BOLD="" C_REV=""
@@ -2481,6 +2494,13 @@ dash_draw_list() {
     if [ "$D_N" -eq 1 ]; then _dl_count="1 repo"; else _dl_count="$D_N repos"; fi
     dash_header "syncto" "$_dl_count"
     if [ "$D_N" -eq 0 ]; then
+        dash_add_line ""
+        logo_r "v$SYNCTO_VERSION" "keeps git repos in sync by themselves"
+        while IFS= read -r _dl_l; do
+            dash_add_line "   $_dl_l"
+        done <<EOF
+$REPLY
+EOF
         dash_add_line ""
         dash_add_line "   No repos yet. Press a to add one, or ? to see how syncto works."
         dash_add_line ""
@@ -2949,6 +2969,13 @@ dash_help() {
     dash_size
     dash_header "How syncto works" ""
     dash_add_line ""
+    logo_r "v$SYNCTO_VERSION" "keeps git repos in sync by themselves"
+    while IFS= read -r _hl; do
+        dash_add_line "   $_hl"
+    done <<EOF
+$REPLY
+EOF
+    dash_add_line ""
     dash_add_line "   Each repo is a git folder with a remote. A sync commits your changes,"
     dash_add_line "   pulls with rebase and pushes. Background syncing (b) runs it on a"
     dash_add_line "   schedule, and right after a save for repos set to sync on save."
@@ -3012,8 +3039,10 @@ cmd_dashboard() {
 # ---------------------------------------------------------------------------
 
 usage() {
+    colors_init
+    logo_r "v$SYNCTO_VERSION" "keeps git repos in sync by themselves: commit, pull, push"
     cat <<EOF
-syncto $SYNCTO_VERSION: keeps git repos in sync by itself (commit, pull, push)
+$REPLY
 
 USAGE
   syncto [-v] [COMMAND]

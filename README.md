@@ -1,8 +1,26 @@
+<div align="center">
+
+<pre>
+╭──▶╮  ┌─┐┬ ┬┌┐┌┌─┐┌┬┐┌─┐
+│ ● │  └─┐└┬┘││││   │ │ │
+╰◀──╯  └─┘ ┴ ┘└┘└─┘ ┴ └─┘
+</pre>
+
 # syncto
 
-Keeps git repos in sync by themselves: commit, pull and push on a timer or as you save.
-When both sides changed the same lines it stops and tells you instead of guessing.
-One bash script for macOS and Linux.
+**Git repos that keep themselves in sync.**<br>
+Commit, pull and push on a timer or as you save. When both sides changed the same
+lines it stops and tells you what to run, instead of guessing.
+
+[![CI](https://github.com/carbongo/syncto/actions/workflows/ci.yml/badge.svg)](https://github.com/carbongo/syncto/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/carbongo/syncto?color=2ea043)](https://github.com/carbongo/syncto/releases/latest)
+[![Homebrew](https://img.shields.io/badge/brew-carbongo%2Ftap%2Fsyncto-fbb040?logo=homebrew&logoColor=white)](https://github.com/carbongo/homebrew-tap)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555?logo=apple&logoColor=white)](docs/scheduling.md)
+[![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-4eaa25?logo=gnubash&logoColor=white)](AGENTS.md)
+[![Dependencies](https://img.shields.io/badge/dependencies-only%20git-blue?logo=git&logoColor=white)](#install)
+[![License: MIT](https://img.shields.io/github/license/carbongo/syncto?color=blue)](LICENSE)
+
+</div>
 
 ## Install
 

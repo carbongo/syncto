@@ -660,6 +660,10 @@ test_help_version_unknown() {
 
     run_syncto "$_t_sb" help
     assert_status "help command: exits 0" 0 "$RC" "$OUT"
+    case "$OUT" in
+        *"╭──▶╮  ┌─┐┬ ┬┌┐┌┌─┐┌┬┐┌─┐"*"keeps git repos in sync"*) ok "help: opens with the logo" ;;
+        *) fail "help: opens with the logo" "$OUT" ;;
+    esac
 
     run_syncto "$_t_sb" frobnicate
     case "$RC:$OUT" in
