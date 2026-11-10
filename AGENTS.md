@@ -19,6 +19,8 @@ CI (`.github/workflows/ci.yml`) runs the lint, and the tests on macOS (bash 3.2)
 - bash 3.2 and 5, BSD and GNU userland: no `declare -A`, `${v^^}`, `mapfile`,
   `readlink -f`, `date -d`, `stat -c`, or `sed -i` without a suffix.
 - `main` runs as `main || rc=$?`, so `set -e` is off inside it: check `$(…)` failures.
+- Brace a variable followed by a non-ASCII character (`${name}…`): bash 3.2 reads the
+  bytes as part of the name.
 - Never auto-resolve a conflict; never rebase into a dirty tree (no `--autostash`).
 - launchd and systemd have no ssh-agent: targets use `key=` or `GIT_SSH_COMMAND`.
 - Comments: one line, only where the code alone would mislead.

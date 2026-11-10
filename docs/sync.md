@@ -18,6 +18,7 @@
 | rebase conflict | conflict | 2 | yes | ✗ needs you, the files and a fix |
 | network: DNS, timeout, dropped connection | warn | 0 | no | · offline, retrying |
 | auth refused | error | 1 | no | ✗ failing |
+| remote missing or not a repository | error | 3 | no | ✗ failing, with how to add it |
 | other git failure | error | 1 | no | ✗ failing |
 | no success for `stale=` | warn | 0 | yes | ! no sync for N h |
 

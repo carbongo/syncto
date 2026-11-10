@@ -415,6 +415,29 @@ test_auth_error_not_conflict() {
     esac
 }
 
+test_missing_remote() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" commit --allow-empty -m init
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,notify=touch $_t_sb/notified"
+    run_syncto "$_t_sb" sync work
+    assert_status "remote: a missing remote exits 3" 3 "$RC" "$OUT"
+    if [ -e "$_t_sb/notified" ]; then
+        fail "remote: a missing remote does not notify" "notify hook ran"
+    else
+        ok "remote: a missing remote does not notify"
+    fi
+    assert_log "remote: logged as error, not conflict" '*level=error*not found*' '*level=conflict*'
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"failing"*"remote 'origin' is missing"*"git remote add origin URL"*) ok "status: a missing remote says how to add it" ;;
+        *) fail "status: a missing remote says how to add it" "$OUT" ;;
+    esac
+}
+
 test_add_failure_logged() {
     fake_ssh_target "unused"
     printf 'x\n' >"$_t_work/new.txt"
@@ -956,11 +979,125 @@ test_edit_options() {
 }
 
 # ---------------------------------------------------------------------------
+# paused=on
+# ---------------------------------------------------------------------------
+
+test_paused() {
+    _t_sb=$(new_sandbox)
+    mkdir -p "$_t_sb/home"
+    _t_bare="$_t_sb/remote.git"
+    _t_work="$_t_sb/home/work"
+    git init -q --bare "$_t_bare"
+    git -C "$_t_bare" symbolic-ref HEAD refs/heads/main
+    git clone -q "$_t_bare" "$_t_work" 2>/dev/null
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" commit --allow-empty -m init
+    git_q "$_t_work" push -q origin main
+    git -C "$_t_work" config user.email t@example.invalid
+    git -C "$_t_work" config user.name t
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,remote=origin,prefix=t,paused=on"
+
+    printf 'x\n' >"$_t_work/a.txt"
+    run_syncto "$_t_sb" sync
+    assert_status "paused: plain sync exits 0" 0 "$RC" "$OUT"
+    if [ -n "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: plain sync leaves it alone"
+    else
+        fail "paused: plain sync leaves it alone" "a.txt was committed"
+    fi
+    run_syncto "$_t_sb" run
+    if [ -n "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: a scheduled pass leaves it alone"
+    else
+        fail "paused: a scheduled pass leaves it alone" "a.txt was committed"
+    fi
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"paused"*"paused=off"*) ok "status: says paused and how to resume" ;;
+        *) fail "status: says paused and how to resume" "$OUT" ;;
+    esac
+
+    run_syncto "$_t_sb" sync work
+    assert_status "paused: sync NAME still syncs it" 0 "$RC" "$OUT"
+    if [ -z "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: sync NAME commits the change"
+    else
+        fail "paused: sync NAME commits the change" "$(git -C "$_t_work" status --porcelain)"
+    fi
+
+    run_syncto "$_t_sb" edit work paused=off
+    printf 'y\n' >"$_t_work/b.txt"
+    run_syncto "$_t_sb" sync
+    if [ -z "$(git -C "$_t_work" status --porcelain)" ]; then
+        ok "paused: resumed target syncs again"
+    else
+        fail "paused: resumed target syncs again" "b.txt left uncommitted"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# dashboard (plain syncto in a terminal)
+# ---------------------------------------------------------------------------
+
+# run_in_pty SANDBOX KEYS: plain syncto in a pseudo-terminal fed KEYS; sets RAW,
+# OUT (escapes stripped) and RC. Uses BSD or util-linux script, whichever exists.
+run_in_pty() {
+    if script --version >/dev/null 2>&1; then
+        RAW=$(printf '%s' "$2" | HOME="$1/home" XDG_CONFIG_HOME="$1/home/.config" \
+            XDG_STATE_HOME="$1/home/.local/state" TERM=xterm \
+            script -qec "'$SYNCTO'" /dev/null 2>&1)
+    else
+        RAW=$(printf '%s' "$2" | HOME="$1/home" XDG_CONFIG_HOME="$1/home/.config" \
+            XDG_STATE_HOME="$1/home/.local/state" TERM=xterm \
+            script -q /dev/null "$SYNCTO" 2>&1)
+    fi
+    RC=$?
+    OUT=$(printf '%s' "$RAW" | LC_ALL=C sed $'s/\033\\[[0-9;?]*[A-Za-z]//g')
+}
+
+test_dashboard() {
+    if ! command -v script >/dev/null 2>&1; then
+        ok "dashboard: skipped, no script(1) here"
+        return 0
+    fi
+    _t_sb=$(new_sandbox)
+    _t_target="$_t_sb/home/notes"
+    mkdir -p "$_t_target"
+    git_q "$_t_target" init
+    run_syncto "$_t_sb" add notes "$_t_target" watch=on
+
+    run_in_pty "$_t_sb" q
+    assert_status "dashboard: q quits with 0" 0 "$RC" "$OUT"
+    case "$OUT" in
+        *notes*"not synced yet"*"q quit"*) ok "dashboard: lists repos with health and keys" ;;
+        *) fail "dashboard: lists repos with health and keys" "$OUT" ;;
+    esac
+    case "$RAW" in
+        *$'\033[?1049l'*) ok "dashboard: restores the terminal on quit" ;;
+        *) fail "dashboard: restores the terminal on quit" "$RAW" ;;
+    esac
+
+    run_in_pty "$_t_sb" "?xq"
+    case "$OUT" in
+        *"How syncto works"*) ok "dashboard: ? shows how syncto works" ;;
+        *) fail "dashboard: ? shows how syncto works" "$OUT" ;;
+    esac
+
+    run_in_pty "$_t_sb" pq
+    case "$(cat "$_t_sb/home/.config/syncto/targets")" in
+        *paused=on*) ok "dashboard: p pauses the selected repo" ;;
+        *) fail "dashboard: p pauses the selected repo" "$(cat "$_t_sb/home/.config/syncto/targets")" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
 
 test_config_roundtrip
 test_edit_options
+test_paused
+test_dashboard
 test_sync_basic
 test_conflict
 test_network_error_not_conflict
@@ -968,6 +1105,7 @@ test_closed_by_remote_host
 test_push_network_error
 test_auth_error_not_conflict
 test_add_failure_logged
+test_missing_remote
 test_locking
 test_guard
 test_stale_alarm
