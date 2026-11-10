@@ -1160,6 +1160,38 @@ test_branch_remote_values() {
     fi
 }
 
+test_control_characters() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    # A guard's output is logged; make it try to set the window title.
+    run_syncto "$_t_sb" add work "$_t_work" "guard=printf '\033]0;OWNED\007\033[2K\302\233X'; exit 7"
+    run_syncto "$_t_sb" sync work
+    _t_esc=$(printf '\033')
+    _t_csi=$(printf '\302\233')
+    case "$(cat "$_t_sb/home/.local/state/syncto/syncto.log")" in
+        *"$_t_esc"*|*"$_t_csi"*|*$'\007'*) fail "control: the log keeps no control characters" "$(cat -v "$_t_sb/home/.local/state/syncto/syncto.log")" ;;
+        *OWNED*) ok "control: the log keeps no control characters" ;;
+        *) fail "control: the log keeps no control characters" "guard output missing" ;;
+    esac
+    # Text written by an older version is cleaned when shown.
+    mkdir -p "$_t_sb/home/.local/state/syncto/outcome"
+    printf 'error\t1\tbad %s]0;X%s\n' "$_t_esc" "$(printf '\007')" >"$_t_sb/home/.local/state/syncto/outcome/work"
+    printf '2026-01-01T00:00:00+0000 level=error target=work msg="raw %s[31m"\n' "$_t_esc" >>"$_t_sb/home/.local/state/syncto/syncto.log"
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"$_t_esc"*) fail "control: status shows no control characters" "$(printf '%s' "$OUT" | cat -v)" ;;
+        *"failing"*"bad ]0;X"*) ok "control: status shows no control characters" ;;
+        *) fail "control: status shows no control characters" "$OUT" ;;
+    esac
+    run_syncto "$_t_sb" log
+    case "$OUT" in
+        *"$_t_esc"*) fail "control: syncto log shows no control characters" "$(printf '%s' "$OUT" | cat -v)" ;;
+        *) ok "control: syncto log shows no control characters" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
@@ -1170,6 +1202,7 @@ test_paused
 test_dashboard
 test_start_reloads
 test_branch_remote_values
+test_control_characters
 test_sync_basic
 test_conflict
 test_network_error_not_conflict

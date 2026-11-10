@@ -50,8 +50,11 @@ epoch() {
 }
 
 # Strip newlines so a log record always stays on one line.
+# Strip newlines so a log record always stays on one line, and every other
+# control character so git or remote output cannot drive the terminal.
 oneline() {
-    printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/  */ /g; s/^ //; s/ $//'
+    printf '%s' "$1" | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' |
+        LC_ALL=C sed "s/$C1_RE//g; s/  */ /g; s/^ //; s/ \$//"
 }
 
 # log LEVEL TARGET MESSAGE
@@ -365,6 +368,8 @@ apply_ssh_env() {
 
 TG_COUNT=0
 TAB=$(printf '\t')
+# C1 control characters (UTF-8 U+0080..U+009F), such as the 8-bit CSI.
+C1_RE=$'\302'"["$'\200'"-"$'\237'"]"
 SO_SEP=$'\001'
 
 targets_load() {
@@ -1185,6 +1190,7 @@ target_health() {
     _th_f="$OUTCOME_DIR/${_th_name//[!A-Za-z0-9._-]/_}"
     if [ -f "$_th_f" ]; then
         IFS="$TAB" read -r _th_kind _th_since _th_msg <"$_th_f" || :
+        _th_msg=${_th_msg//[[:cntrl:]]/}
     fi
     case "$_th_path" in
         *" "*) _th_cd="cd \"$_th_path\"" ;;
@@ -1499,7 +1505,7 @@ cmd_log() {
         printf 'syncto: no log yet at %s\n' "$(path_encode "$LOG_FILE")" >&2
         return 0
     fi
-    tail -n 100 "$LOG_FILE"
+    tail -n 100 "$LOG_FILE" | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "s/$C1_RE//g"
 }
 
 # ---------------------------------------------------------------------------
@@ -2722,6 +2728,7 @@ dash_details() {
                 _dt_ts=${_dt_l%% *}
                 _dt_msg=${_dt_l#*msg=\"}
                 _dt_msg=${_dt_msg%\"}
+                _dt_msg=${_dt_msg//[[:cntrl:]]/}
                 case "$_dt_msg" in
                     "sync ok ("*"committed=1"*) _dt_msg="synced: committed and pushed" ;;
                     "sync ok ("*"pulled=0"*) _dt_msg="synced: pushed, pull left for later" ;;

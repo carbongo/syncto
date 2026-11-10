@@ -42,6 +42,6 @@ Global config only: `log=PATH` (`~/.local/state/syncto/syncto.log`) and `log_max
 |---|---|
 | `SYNCTO_NAME`, `SYNCTO_PATH` | the repo's name and absolute path |
 | `SYNCTO_BRANCH`, `SYNCTO_REMOTE` | branch and remote in use |
-| `SYNCTO_MESSAGE` | the commit message, or for `notify=` the problem |
+| `SYNCTO_MESSAGE` | the commit message, or for `notify=` the problem; untrusted text from git, never run it |
 
 Only `guard=`'s exit status matters; `notify=` and `peer=` never fail a sync.
