@@ -4,7 +4,7 @@
 
 set -eu
 
-SYNCTO_VERSION="1.0.1"
+SYNCTO_VERSION="1.1.0"
 SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
