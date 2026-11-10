@@ -42,7 +42,11 @@ timestamp() {
 }
 
 epoch() {
-    date '+%s'
+    if [ -n "${EPOCHSECONDS:-}" ]; then
+        printf '%s' "$EPOCHSECONDS"
+    else
+        date '+%s'
+    fi
 }
 
 # Strip newlines so a log record always stays on one line.
@@ -121,10 +125,16 @@ worst_code() {
 # ---------------------------------------------------------------------------
 
 path_encode() {
+    path_enc_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# path_enc_r PATH: REPLY is PATH with $HOME written as ~.
+path_enc_r() {
     case "$1" in
-        "$HOME") printf '~' ;;
-        "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
-        *) printf '%s' "$1" ;;
+        "$HOME") REPLY='~' ;;
+        "$HOME"/*) REPLY="~${1#"$HOME"}" ;;
+        *) REPLY=$1 ;;
     esac
 }
 
@@ -152,29 +162,23 @@ abs_path() {
 # Split a comma separated option list, honouring "\," as a literal comma.
 # One option per output line.
 split_opts() {
-    _so_in=$1
-    _so_cur=""
-    while [ -n "$_so_in" ]; do
-        _so_c=${_so_in%"${_so_in#?}"}
-        _so_in=${_so_in#?}
-        if [ "$_so_c" = "\\" ] && [ -n "$_so_in" ]; then
-            _so_n=${_so_in%"${_so_in#?}"}
-            _so_in=${_so_in#?}
-            if [ "$_so_n" = "," ]; then
-                _so_cur="$_so_cur,"
-            else
-                _so_cur="$_so_cur$_so_c$_so_n"
-            fi
-        elif [ "$_so_c" = "," ]; then
-            printf '%s\n' "$_so_cur"
-            _so_cur=""
-        else
-            _so_cur="$_so_cur$_so_c"
-        fi
+    split_opts_a "$1"
+    [ "${#SO[@]}" -eq 0 ] || printf '%s\n' "${SO[@]}"
+    return 0
+}
+
+# split_opts_a OPTS: array SO holds the options, with "\," kept as a comma.
+split_opts_a() {
+    SO=()
+    _so_s=${1//\\,/$SO_SEP}
+    while [ -n "$_so_s" ]; do
+        _so_i=${_so_s%%,*}
+        case "$_so_s" in
+            *,*) _so_s=${_so_s#*,} ;;
+            *) _so_s="" ;;
+        esac
+        [ -n "$_so_i" ] && SO[${#SO[@]}]=${_so_i//$SO_SEP/,}
     done
-    if [ -n "$_so_cur" ]; then
-        printf '%s\n' "$_so_cur"
-    fi
     return 0
 }
 
@@ -188,7 +192,14 @@ known_key() {
 }
 
 trim() {
-    printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+    trim_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# trim_r TEXT: REPLY is TEXT without surrounding whitespace, without a subshell.
+trim_r() {
+    REPLY=${1#"${1%%[![:space:]]*}"}
+    REPLY=${REPLY%"${REPLY##*[![:space:]]}"}
 }
 
 validate_value() {
@@ -283,7 +294,8 @@ load_config() {
                 continue
                 ;;
         esac
-        _lc_k=$(trim "${_lc_line%%=*}")
+        trim_r "${_lc_line%%=*}"
+        _lc_k=$REPLY
         _lc_v=${_lc_line#*=}
         if ! known_key "$_lc_k"; then
             warn "$CONFIG_FILE:$_lc_n: unknown key '$_lc_k', ignored"
@@ -344,6 +356,7 @@ apply_ssh_env() {
 
 TG_COUNT=0
 TAB=$(printf '\t')
+SO_SEP=$'\001'
 
 targets_load() {
     TG_COUNT=0
@@ -355,23 +368,31 @@ targets_load() {
         case "$_tl_line" in
             ''|'#'*) continue ;;
         esac
-        _tl_name=""
-        _tl_path=""
-        _tl_opts=""
-        IFS="$TAB" read -r _tl_name _tl_path _tl_opts <<EOF || :
-$_tl_line
-EOF
-        if [ -z "$_tl_name" ] || [ -z "$_tl_path" ]; then
+        _tl_name=${_tl_line%%"$TAB"*}
+        _tl_rest=${_tl_line#*"$TAB"}
+        _tl_path=${_tl_rest%%"$TAB"*}
+        case "$_tl_rest" in
+            *"$TAB"*) _tl_opts=${_tl_rest#*"$TAB"} ;;
+            *) _tl_opts="" ;;
+        esac
+        if [ "$_tl_name" = "$_tl_line" ] || [ -z "$_tl_name" ] || [ -z "$_tl_path" ]; then
             warn "$TARGETS_FILE:$_tl_n: expected NAME<TAB>PATH[<TAB>OPTIONS], ignored"
             TG_MALFORMED=1
             continue
         fi
-        eval "TG_NAME_$TG_COUNT=\$_tl_name"
-        eval "TG_PATH_$TG_COUNT=\$(path_decode \"\$_tl_path\")"
-        eval "TG_OPTS_$TG_COUNT=\$_tl_opts"
+        case "$_tl_path" in
+            \~) _tl_path=$HOME ;;
+            \~/*) _tl_path="$HOME${_tl_path#\~}" ;;
+        esac
+        eval "TG_NAME_$TG_COUNT=\$_tl_name TG_PATH_$TG_COUNT=\$_tl_path TG_OPTS_$TG_COUNT=\$_tl_opts"
         TG_COUNT=$((TG_COUNT + 1))
     done <"$TARGETS_FILE"
     return 0
+}
+
+# tg_get INDEX: TGN, TGP and TGO are that target's name, path and options.
+tg_get() {
+    eval "TGN=\$TG_NAME_$1 TGP=\$TG_PATH_$1 TGO=\$TG_OPTS_$1"
 }
 
 TG_MALFORMED=0
@@ -418,10 +439,11 @@ resolve_opts() {
     t_ssh=$G_SSH
     t_rc=0
     [ "$t_remote_poll" = "off" ] && t_remote_poll=0
-    _ro_opts=$1
-    [ -n "$_ro_opts" ] || return 0
-    while IFS= read -r _ro_kv; do
-        _ro_kv=$(trim "$_ro_kv")
+    [ -n "$1" ] || return 0
+    split_opts_a "$1"
+    for _ro_kv in ${SO[@]+"${SO[@]}"}; do
+        trim_r "$_ro_kv"
+        _ro_kv=$REPLY
         [ -n "$_ro_kv" ] || continue
         case "$_ro_kv" in
             *=*) : ;;
@@ -431,7 +453,8 @@ resolve_opts() {
                 continue
                 ;;
         esac
-        _ro_k=$(trim "${_ro_kv%%=*}")
+        trim_r "${_ro_kv%%=*}"
+        _ro_k=$REPLY
         _ro_v=${_ro_kv#*=}
         if ! known_key "$_ro_k"; then
             warn "unknown option '$_ro_k', ignored"
@@ -460,9 +483,7 @@ resolve_opts() {
             ssh|GIT_SSH_COMMAND) t_ssh=$_ro_v ;;
             log|log_max) : ;;
         esac
-    done <<EOF
-$(split_opts "$_ro_opts")
-EOF
+    done
     [ "$t_remote_poll" = "off" ] && t_remote_poll=0
     return 0
 }
@@ -472,7 +493,7 @@ EOF
 # ---------------------------------------------------------------------------
 
 safe_name() {
-    printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+    printf '%s' "${1//[!A-Za-z0-9._-]/_}"
 }
 
 lock_acquire() {
@@ -878,15 +899,14 @@ mark_ok() {
 }
 
 last_ok() {
-    _lo_f="$OK_DIR/$(safe_name "$1")"
-    _lo_v=0
+    _lo_f="$OK_DIR/${1//[!A-Za-z0-9._-]/_}"
+    REPLY=0
     if [ -f "$_lo_f" ]; then
-        _lo_v=$(sed -n '1p' "$_lo_f" 2>/dev/null || printf '0')
+        { read -r REPLY || :; } <"$_lo_f" 2>/dev/null
     fi
-    case "$_lo_v" in
-        ''|*[!0-9]*) _lo_v=0 ;;
+    case "$REPLY" in
+        ''|*[!0-9]*) REPLY=0 ;;
     esac
-    printf '%s' "$_lo_v"
 }
 
 # outcome NAME KIND MESSAGE: log a failed pass and keep it for status.
@@ -906,14 +926,20 @@ outcome() {
 # stale_limit -> seconds without a sync before a target is stale, or "off".
 # 0 derives it from the interval. Uses the caller's t_*.
 stale_limit() {
+    stale_limit_r
+    printf '%s' "$REPLY"
+}
+
+# stale_limit_r: REPLY is stale_limit's answer, without a subshell.
+stale_limit_r() {
     if [ "$t_stale" = "off" ]; then
-        printf 'off'
+        REPLY=off
         return 0
     fi
-    _sl=$t_stale
-    [ "$_sl" -eq 0 ] && _sl=$((t_interval * 12))
-    [ "$_sl" -lt 600 ] && _sl=600
-    printf '%s' "$_sl"
+    REPLY=$t_stale
+    [ "$REPLY" -eq 0 ] && REPLY=$((t_interval * 12))
+    [ "$REPLY" -lt 600 ] && REPLY=600
+    return 0
 }
 
 # stale_check NAME: alert when a target has not synced for too long,
@@ -922,7 +948,8 @@ stale_check() {
     _sc_name=$1
     _sc_limit=$(stale_limit)
     [ "$_sc_limit" = "off" ] && return 0
-    _sc_last=$(last_ok "$_sc_name")
+    last_ok "$_sc_name"
+    _sc_last=$REPLY
     if [ "$_sc_last" -eq 0 ]; then
         # First run: start the clock instead of alerting.
         mark_ok "$_sc_name"
@@ -950,15 +977,14 @@ mark_run() {
 }
 
 last_run() {
-    _lr_f="$LAST_DIR/$(safe_name "$1")"
-    _lr_v=0
+    _lr_f="$LAST_DIR/${1//[!A-Za-z0-9._-]/_}"
+    REPLY=0
     if [ -f "$_lr_f" ]; then
-        _lr_v=$(sed -n '1p' "$_lr_f" 2>/dev/null || printf '0')
+        { read -r REPLY || :; } <"$_lr_f" 2>/dev/null
     fi
-    case "$_lr_v" in
-        ''|*[!0-9]*) _lr_v=0 ;;
+    case "$REPLY" in
+        ''|*[!0-9]*) REPLY=0 ;;
     esac
-    printf '%s' "$_lr_v"
 }
 
 # ---------------------------------------------------------------------------
@@ -1044,7 +1070,8 @@ cmd_run() {
             _cd_i=$((_cd_i + 1))
             continue
         fi
-        _cd_last=$(last_run "$_cd_name")
+        last_run "$_cd_name"
+        _cd_last=$REPLY
         _cd_age=$((_cd_now - _cd_last))
         # Grace window (10% of the interval, 5..30 s): schedulers drift, and an
         # exact interval would skip every other pass.
@@ -1069,25 +1096,37 @@ cmd_run() {
 
 # human_ago SECONDS -> "just now", "4 min ago", "3 h ago", "2 days ago"
 human_ago() {
+    human_ago_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# human_ago_r SECONDS: REPLY is human_ago's answer, without a subshell.
+human_ago_r() {
     if [ "$1" -lt 60 ]; then
-        printf 'just now'
+        REPLY="just now"
     elif [ "$1" -lt 3600 ]; then
-        printf '%s min ago' $(($1 / 60))
+        REPLY="$(($1 / 60)) min ago"
     elif [ "$1" -lt 172800 ]; then
-        printf '%s h ago' $(($1 / 3600))
+        REPLY="$(($1 / 3600)) h ago"
     else
-        printf '%s days ago' $(($1 / 86400))
+        REPLY="$(($1 / 86400)) days ago"
     fi
 }
 
 # human_every SECONDS -> "every 10 min", "every 1 h", "every 90 s"
 human_every() {
+    human_every_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# human_every_r SECONDS: REPLY is human_every's answer, without a subshell.
+human_every_r() {
     if [ $(($1 % 3600)) -eq 0 ]; then
-        printf 'every %s h' $(($1 / 3600))
+        REPLY="every $(($1 / 3600)) h"
     elif [ $(($1 % 60)) -eq 0 ]; then
-        printf 'every %s min' $(($1 / 60))
+        REPLY="every $(($1 / 60)) min"
     else
-        printf 'every %s s' "$1"
+        REPLY="every $1 s"
     fi
 }
 
@@ -1095,22 +1134,24 @@ human_every() {
 cd_hint() {
     case "$1" in
         *" "*) printf 'cd "%s"' "$1" ;;
-        *) printf 'cd %s' "$(path_encode "$1")" ;;
+        *) path_enc_r "$1"; printf 'cd %s' "$REPLY" ;;
     esac
 }
 
 # target_health INDEX: sets H_LEVEL (ok, wait, warn, bad), H_TEXT, H_DETAIL,
 # H_FIX and H_HOW for that target, in words a person can act on.
 target_health() {
-    _th_name=$(tg_name "$1")
-    _th_path=$(tg_path "$1")
-    resolve_opts "$(tg_opts "$1")" || :
+    tg_get "$1"
+    _th_name=$TGN
+    _th_path=$TGP
+    resolve_opts "$TGO" || :
     H_DETAIL=""
     H_FIX=""
     if [ "$t_watch" = "on" ]; then
         H_HOW="on save"
     else
-        H_HOW=$(human_every "$t_interval")
+        human_every_r "$t_interval"
+        H_HOW=$REPLY
     fi
     case "$t_mode" in
         push) H_HOW="$H_HOW, push only" ;;
@@ -1121,20 +1162,25 @@ target_health() {
         H_LEVEL=bad H_TEXT="folder is missing" H_FIX="restore it, or: syncto remove $_th_name"
         return 0
     fi
-    if ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ ! -e "$_th_path/.git" ] && ! git_in "$_th_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         H_LEVEL=bad H_TEXT="not a git repo" H_FIX="git init it, or: syncto remove $_th_name"
         return 0
     fi
 
-    _th_now=$(epoch)
-    _th_ok=$(last_ok "$_th_name")
+    _th_now=${NOW:-}
+    [ -n "$_th_now" ] || _th_now=$(epoch)
+    last_ok "$_th_name"
+    _th_ok=$REPLY
     _th_kind=""
     _th_msg=""
-    _th_f="$OUTCOME_DIR/$(safe_name "$_th_name")"
+    _th_f="$OUTCOME_DIR/${_th_name//[!A-Za-z0-9._-]/_}"
     if [ -f "$_th_f" ]; then
         IFS="$TAB" read -r _th_kind _th_since _th_msg <"$_th_f" || :
     fi
-    _th_cd=$(cd_hint "$_th_path")
+    case "$_th_path" in
+        *" "*) _th_cd="cd \"$_th_path\"" ;;
+        *) path_enc_r "$_th_path"; _th_cd="cd $REPLY" ;;
+    esac
     if [ "$t_paused" = "on" ] && [ "$_th_kind" != "conflict" ] && [ "$_th_kind" != "error" ]; then
         H_LEVEL=wait H_TEXT="paused"
         H_FIX="resume: syncto edit $_th_name paused=off"
@@ -1183,7 +1229,8 @@ target_health() {
         offline)
             H_LEVEL=wait H_TEXT="offline, retrying"
             if [ "$_th_ok" -gt 0 ]; then
-                H_DETAIL="last synced $(human_ago $((_th_now - _th_ok))). $_th_msg"
+                human_ago_r $((_th_now - _th_ok))
+                H_DETAIL="last synced $REPLY. $_th_msg"
             else
                 H_DETAIL=$_th_msg
             fi
@@ -1191,18 +1238,21 @@ target_health() {
             ;;
     esac
 
-    if [ "$(last_run "$_th_name")" -eq 0 ]; then
+    last_run "$_th_name"
+    if [ "$REPLY" -eq 0 ]; then
         H_LEVEL=wait H_TEXT="not synced yet"
         return 0
     fi
-    _th_limit=$(stale_limit)
+    stale_limit_r
+    _th_limit=$REPLY
+    human_ago_r $((_th_now - _th_ok))
     if [ "$_th_limit" != "off" ] && [ $((_th_now - _th_ok)) -ge "$_th_limit" ]; then
-        H_LEVEL=warn H_TEXT="no sync for $(human_ago $((_th_now - _th_ok)) | sed 's/ ago$//')"
+        H_LEVEL=warn H_TEXT="no sync for ${REPLY% ago}"
         H_DETAIL="passes keep being skipped (guard, or edits in progress)"
         H_FIX="syncto log"
         return 0
     fi
-    H_LEVEL=ok H_TEXT="synced $(human_ago $((_th_now - _th_ok)))"
+    H_LEVEL=ok H_TEXT="synced $REPLY"
     return 0
 }
 
@@ -1241,17 +1291,22 @@ cmd_status() {
     fi
 
     colors_init
-    _st_cols=${COLUMNS:-$(tput cols 2>/dev/null || printf '100')}
+    NOW=$(epoch)
+    _st_cols=${COLUMNS:-}
+    if [ -z "$_st_cols" ] && [ -t 1 ]; then
+        _st_cols=$(stty size 2>/dev/null || printf '0 100')
+        _st_cols=${_st_cols#* }
+    fi
     case "$_st_cols" in ''|*[!0-9]*) _st_cols=100 ;; esac
 
     _st_w=4
     _st_i=0
     while [ "$_st_i" -lt "$TG_COUNT" ]; do
-        _st_n=$(tg_name "$_st_i")
-        [ "${#_st_n}" -gt "$_st_w" ] && _st_w=${#_st_n}
+        tg_get "$_st_i"
+        [ "${#TGN}" -gt "$_st_w" ] && _st_w=${#TGN}
         _st_i=$((_st_i + 1))
     done
-    _st_pad=$(printf "%$((_st_w + 4))s" "")
+    printf -v _st_pad "%$((_st_w + 4))s" ""
     _st_room=$((_st_cols - _st_w - 4))
     [ "$_st_room" -lt 20 ] && _st_room=20
 
@@ -1259,12 +1314,14 @@ cmd_status() {
     while [ "$_st_i" -lt "$TG_COUNT" ]; do
         target_health "$_st_i"
         level_style "$H_LEVEL"
-        printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$(tg_name "$_st_i")" \
-            "$L_C" "$L_SYM" "$H_TEXT" "$C_OFF" "$H_HOW" "$(path_encode "$(tg_path "$_st_i")")"
+        path_enc_r "$TGP"
+        printf "%-${_st_w}s  %s%s %-20s%s  %-15s %s\n" "$TGN" \
+            "$L_C" "$L_SYM" "$H_TEXT" "$C_OFF" "$H_HOW" "$REPLY"
         _st_line=$H_DETAIL
         # Long git output is cut to the terminal width; the fix line never is.
-        if [ -t 1 ] && [ "${#_st_line}" -gt "$_st_room" ]; then
-            _st_line="$(printf '%s' "$_st_line" | cut -c1-$((_st_room - 1)))…"
+        if [ -t 1 ]; then
+            fit_r "$_st_line" "$_st_room"
+            _st_line=$REPLY
         fi
         [ -n "$_st_line" ] && printf '%s%s%s%s\n' "$_st_pad" "$C_DIM" "$_st_line" "$C_OFF"
         [ -n "$H_FIX" ] && printf '%sfix: %s\n' "$_st_pad" "$H_FIX"
@@ -2034,14 +2091,20 @@ background_words() {
 
 # fit TEXT WIDTH -> TEXT cut to WIDTH characters, ending in … when cut
 fit() {
+    fit_r "$1" "$2"
+    printf '%s' "$REPLY"
+}
+
+# fit_r TEXT WIDTH: REPLY is fit's answer, without a subshell.
+fit_r() {
     if [ "$2" -lt 1 ]; then
-        return 0
+        REPLY=""
+    elif [ "${#1}" -le "$2" ]; then
+        REPLY=$1
     elif [ "$2" -lt 2 ]; then
-        printf '%s' "${1:0:$2}"
-    elif [ "${#1}" -gt "$2" ]; then
-        printf '%s…' "${1:0:$(($2 - 1))}"
+        REPLY=${1:0:$2}
     else
-        printf '%s' "$1"
+        REPLY="${1:0:$(($2 - 1))}…"
     fi
 }
 
@@ -2077,7 +2140,7 @@ dash_enter() {
     trap 'dash_leave; exit 130' INT TERM
     trap 'dash_leave' EXIT
     # A resize interrupts the key wait, and every frame re-reads the size.
-    trap ':' WINCH
+    trap 'D_RESIZED=1' WINCH
 }
 
 dash_leave() {
@@ -2089,6 +2152,8 @@ dash_leave() {
 }
 
 dash_size() {
+    [ "${D_RESIZED:-1}" -eq 1 ] || return 0
+    D_RESIZED=0
     # stty reads the terminal on stdin; tput inside $(...) can miss it.
     _ds_size=$(stty size 2>/dev/null || printf '24 80')
     D_LINES=${_ds_size% *}
@@ -2098,7 +2163,8 @@ dash_size() {
     # A pty created without a size reports 0 0.
     [ "$D_COLS" -lt 20 ] && D_COLS=80
     [ "$D_LINES" -lt 8 ] && D_LINES=24
-    D_SEP=$(printf '─%.0s' $(seq 1 "$D_COLS"))
+    printf -v D_SEP '%*s' "$D_COLS" ""
+    D_SEP=${D_SEP// /─}
 }
 
 # dash_key: waits up to D_TICK seconds and sets D_KEY to up, down, left, right,
@@ -2153,25 +2219,32 @@ dash_finish() {
     while [ "$D_FL" -lt $((D_LINES - 2)) ]; do
         dash_add_line ""
     done
-    dash_add_line " ${D_MSG:+$C_BOLD$(fit "$D_MSG" $((D_COLS - 2)))$C_OFF}"
-    D_FRAME="$D_FRAME $C_DIM$(fit "$1" $((D_COLS - 2)))$C_OFF"
+    fit_r "$D_MSG" $((D_COLS - 2))
+    dash_add_line " ${D_MSG:+$C_BOLD$REPLY$C_OFF}"
+    fit_r "$1" $((D_COLS - 2))
+    D_FRAME="$D_FRAME $C_DIM$REPLY$C_OFF"
     dash_paint
 }
 
 dash_header() {
     D_FRAME=""
     D_FL=0
-    _dh_right=$2
-    _dh_vis=$(printf '%s' "$_dh_right" | sed $'s/\033\\[[0-9;]*m//g')
+    _dh_vis=$2
+    for _dh_c in "$C_OK" "$C_WAIT" "$C_WARN" "$C_BAD" "$C_DIM" "$C_OFF" "$C_BOLD" "$C_REV"; do
+        [ -n "$_dh_c" ] && _dh_vis=${_dh_vis//"$_dh_c"/}
+    done
     _dh_room=$((D_COLS - ${#_dh_vis} - 3))
     [ "$_dh_room" -lt 1 ] && _dh_room=1
-    dash_add_line " $C_BOLD$(printf "%-${_dh_room}s" "$(fit "$1" "$_dh_room")")$C_OFF $_dh_right"
+    fit_r "$1" "$_dh_room"
+    printf -v _dh_left "%-${_dh_room}s" "$REPLY"
+    dash_add_line " $C_BOLD$_dh_left$C_OFF $2"
     dash_add_line "$C_DIM$D_SEP$C_OFF"
 }
 
 # dash_refresh: health of every target into D_* variables
 dash_refresh() {
     targets_load
+    NOW=$(epoch)
     D_N=$TG_COUNT
     [ "$D_SEL" -ge "$D_N" ] && D_SEL=$((D_N - 1))
     [ "$D_SEL" -lt 0 ] && D_SEL=0
@@ -2181,19 +2254,30 @@ dash_refresh() {
         eval "D_LV_$_dr_i=\$H_LEVEL D_TX_$_dr_i=\$H_TEXT D_DT_$_dr_i=\$H_DETAIL D_FX_$_dr_i=\$H_FIX D_HW_$_dr_i=\$H_HOW"
         _dr_i=$((_dr_i + 1))
     done
-    D_BG=$(background_state)
+    # launchctl and systemctl are slow: ask at most every 30 s unless forced.
+    if [ "${1:-}" = "all" ] || [ $((NOW - ${D_BG_AT:-0})) -ge 30 ]; then
+        D_BG=$(background_state)
+        D_BG_AT=$NOW
+    fi
+    NOW=""
 }
 
 # dash_rows INDEX -> screen lines target INDEX takes in the list
 dash_rows() {
+    dash_rows_r "$1"
+    printf '%s' "$REPLY"
+}
+
+# dash_rows_r INDEX: REPLY is dash_rows' answer, without a subshell.
+dash_rows_r() {
     eval "_dr_lv=\$D_LV_$1 _dr_dt=\$D_DT_$1 _dr_fx=\$D_FX_$1"
-    _dr_r=1
+    REPLY=1
     # shellcheck disable=SC2154 # set by eval
     if [ "$_dr_lv" = "bad" ] || [ "$_dr_lv" = "warn" ]; then
-        [ -n "$_dr_dt" ] && _dr_r=$((_dr_r + 1))
-        [ -n "$_dr_fx" ] && _dr_r=$((_dr_r + 1))
+        [ -n "$_dr_dt" ] && REPLY=$((REPLY + 1))
+        [ -n "$_dr_fx" ] && REPLY=$((REPLY + 1))
     fi
-    printf '%s' "$_dr_r"
+    return 0
 }
 
 dash_draw_list() {
@@ -2212,11 +2296,11 @@ dash_draw_list() {
     _dl_w=4
     _dl_i=0
     while [ "$_dl_i" -lt "$D_N" ]; do
-        _dl_n=$(tg_name "$_dl_i")
-        [ "${#_dl_n}" -gt "$_dl_w" ] && _dl_w=${#_dl_n}
+        tg_get "$_dl_i"
+        [ "${#TGN}" -gt "$_dl_w" ] && _dl_w=${#TGN}
         _dl_i=$((_dl_i + 1))
     done
-    _dl_pad=$(printf "%$((_dl_w + 5))s" "")
+    printf -v _dl_pad "%$((_dl_w + 5))s" ""
     _dl_room=$((D_COLS - _dl_w - 6))
 
     # Scroll so the selected row is on screen.
@@ -2226,7 +2310,8 @@ dash_draw_list() {
         _dl_used=0
         _dl_i=$D_TOP
         while [ "$_dl_i" -le "$D_SEL" ]; do
-            _dl_used=$((_dl_used + $(dash_rows "$_dl_i")))
+            dash_rows_r "$_dl_i"
+            _dl_used=$((_dl_used + REPLY))
             _dl_i=$((_dl_i + 1))
         done
         if [ "$_dl_used" -le "$_dl_avail" ] || [ "$D_TOP" -ge "$D_SEL" ]; then
@@ -2235,25 +2320,34 @@ dash_draw_list() {
         D_TOP=$((D_TOP + 1))
     done
 
+    _dl_rest=$((D_COLS - _dl_w - 44))
+    [ "$_dl_rest" -lt 1 ] && _dl_rest=1
     _dl_i=$D_TOP
     while [ "$_dl_i" -lt "$D_N" ] && [ "$D_FL" -lt $((D_LINES - 4)) ]; do
         eval "_dl_lv=\$D_LV_$_dl_i _dl_tx=\$D_TX_$_dl_i _dl_dt=\$D_DT_$_dl_i _dl_fx=\$D_FX_$_dl_i _dl_hw=\$D_HW_$_dl_i"
         # shellcheck disable=SC2154 # set by eval
         level_style "$_dl_lv"
-        _dl_name=$(printf "%-${_dl_w}s" "$(tg_name "$_dl_i")")
+        tg_get "$_dl_i"
+        printf -v _dl_name "%-${_dl_w}s" "$TGN"
         if [ "$_dl_i" -eq "$D_SEL" ]; then
             _dl_mark="▸" _dl_name="$C_REV$_dl_name$C_OFF"
         else
             _dl_mark=" "
         fi
-        _dl_path=$(path_encode "$(tg_path "$_dl_i")")
-        _dl_rest=$((D_COLS - _dl_w - 44))
-        [ "$_dl_rest" -lt 1 ] && _dl_rest=1
         # shellcheck disable=SC2154 # set by eval
-        dash_add_line " $_dl_mark $_dl_name  $L_C$L_SYM $(printf '%-20s' "$_dl_tx")$C_OFF $(printf '%-15s' "$_dl_hw") $C_DIM$(fit "$_dl_path" "$_dl_rest")$C_OFF"
+        printf -v _dl_cols '%-20s%s %-15s' "$_dl_tx" "$C_OFF" "$_dl_hw"
+        path_enc_r "$TGP"
+        fit_r "$REPLY" "$_dl_rest"
+        dash_add_line " ${_dl_mark} $_dl_name  $L_C$L_SYM $_dl_cols $C_DIM$REPLY$C_OFF"
         if [ "$_dl_lv" = "bad" ] || [ "$_dl_lv" = "warn" ]; then
-            [ -n "$_dl_dt" ] && dash_add_line "$_dl_pad$C_DIM$(fit "$_dl_dt" "$_dl_room")$C_OFF"
-            [ -n "$_dl_fx" ] && dash_add_line "${_dl_pad}fix: $(fit "$_dl_fx" $((_dl_room - 5)))"
+            if [ -n "$_dl_dt" ]; then
+                fit_r "$_dl_dt" "$_dl_room"
+                dash_add_line "$_dl_pad$C_DIM$REPLY$C_OFF"
+            fi
+            if [ -n "$_dl_fx" ]; then
+                fit_r "$_dl_fx" $((_dl_room - 5))
+                dash_add_line "${_dl_pad}fix: $REPLY"
+            fi
         fi
         _dl_i=$((_dl_i + 1))
     done
@@ -2290,6 +2384,7 @@ dash_confirm() {
 # dash_do MESSAGE CMD...: runs a syncto action in a subshell so its errors
 # cannot end the dashboard; sets D_MSG to MESSAGE or to the first error line.
 dash_do() {
+    D_BG_AT=0
     _dd_msg=$1
     shift
     _dd_out=$( ("$@") 2>&1 ) && _dd_rc=0 || _dd_rc=$?
