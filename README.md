@@ -7,7 +7,13 @@ One bash script for macOS and Linux.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/carbongo/syncto/main/install.sh | sh
+brew install carbongo/tap/syncto
+```
+
+or without Homebrew, into `~/.local`:
+
+```sh
+curl -fsSL https://github.com/carbongo/syncto/releases/latest/download/install.sh | sh
 ```
 
 Needs git and bash 3.2 or newer (the bash macOS ships works). `fswatch` or
