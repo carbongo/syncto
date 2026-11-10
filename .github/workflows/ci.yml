@@ -3,26 +3,18 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  shellcheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - name: Install ShellCheck 0.11.0
-        run: |
-          curl -fsSL -o shellcheck.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
-          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz" | sha256sum -c -
-          tar -xJf shellcheck.tar.xz
-          sudo install shellcheck-v0.11.0/shellcheck /usr/local/bin/
-      - run: shellcheck -S warning syncto.sh install.sh uninstall.sh test.sh
-
   test:
     strategy:
       fail-fast: false
@@ -37,5 +29,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: ${{ matrix.bash }} --version | head -1
+      - name: ShellCheck 0.11.0
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o shellcheck.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          shellcheck-v0.11.0/shellcheck -S warning syncto.sh install.sh uninstall.sh test.sh
       - run: ${{ matrix.bash }} ./test.sh

@@ -8,8 +8,11 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: macos-latest
+  # Tags are cut from main, which CI has already tested on macOS and Linux.
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -18,17 +21,6 @@ jobs:
         run: |
           v=$(sed -n 's/^SYNCTO_VERSION="\(.*\)"$/\1/p' syncto.sh)
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag is $GITHUB_REF_NAME but syncto.sh says $v"; exit 1; }
-      - run: /bin/bash ./test.sh
-
-  publish:
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
       - name: Pin install.sh to this release and list checksums
         run: |
           sed -i "s/^SYNCTO_TAG=latest$/SYNCTO_TAG=$GITHUB_REF_NAME/" install.sh
