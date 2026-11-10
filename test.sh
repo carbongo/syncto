@@ -1119,6 +1119,14 @@ test_dashboard() {
     esac
 
     run_in_pty "$_t_sb" pq
+
+    git -C "$_t_target" remote add origin "https://user:tok123@example.invalid/x.git"
+    run_in_pty "$_t_sb" $'\r'qq
+    case "$OUT" in
+        *tok123*) fail "dashboard: hides credentials in remote URLs" "$OUT" ;;
+        *"https://example.invalid/x.git"*) ok "dashboard: hides credentials in remote URLs" ;;
+        *) fail "dashboard: hides credentials in remote URLs" "$OUT" ;;
+    esac
     case "$(cat "$_t_sb/home/.config/syncto/targets")" in
         *paused=on*) ok "dashboard: p pauses the selected repo" ;;
         *) fail "dashboard: p pauses the selected repo" "$(cat "$_t_sb/home/.config/syncto/targets")" ;;
@@ -1271,6 +1279,58 @@ test_subfolder_target() {
     esac
 }
 
+test_private_files() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    run_syncto "$_t_sb" add work "$_t_work"
+    case "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto" | cut -c1-10 | sort -u)" in
+        drwx------) ok "private: new config and state folders are owner-only" ;;
+        *) fail "private: new config and state folders are owner-only" "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto")" ;;
+    esac
+    chmod 755 "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto"
+    chmod 644 "$_t_sb/home/.config/syncto/targets"
+    mkdir -p "$_t_sb/stub"
+    for _t_b in launchctl systemctl; do
+        printf '#!/bin/sh\nexit 0\n' >"$_t_sb/stub/$_t_b"
+        chmod +x "$_t_sb/stub/$_t_b"
+    done
+    run_syncto_path "$_t_sb" "$_t_sb/stub" start
+    case "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto" | cut -c1-10 | sort -u):$(ls -l "$_t_sb/home/.config/syncto/targets" | cut -c1-10)" in
+        "drwx------:-rw-------") ok "private: start makes existing ones owner-only" ;;
+        *) fail "private: start makes existing ones owner-only" "$(ls -ld "$_t_sb/home/.config/syncto" "$_t_sb/home/.local/state/syncto" "$_t_sb/home/.config/syncto/targets")" ;;
+    esac
+}
+
+test_key_path_quoting() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work" "$_t_sb/stub"
+    git_q "$_t_work" init
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" commit --allow-empty -m init
+    git_q "$_t_work" remote add origin "ssh://git@example.invalid/x.git"
+    # A stand-in ssh records the key path it was given.
+    printf '#!/bin/sh\nprintf "%%s" "$2" >"%s/got"\nexit 255\n' "$_t_sb" >"$_t_sb/stub/ssh"
+    chmod +x "$_t_sb/stub/ssh"
+    _t_key="$_t_sb/it's \$(touch $_t_sb/PWNED) \`x\` \"k\""
+    mkdir -p "$_t_sb/home/.config/syncto"
+    printf 'work\t%s\tbranch=main,key=%s\n' "$_t_work" "$(printf '%s' "$_t_key" | sed 's/,/\\,/g')" \
+        >"$_t_sb/home/.config/syncto/targets"
+    run_syncto_path "$_t_sb" "$_t_sb/stub" sync work
+    if [ -e "$_t_sb/PWNED" ]; then
+        fail "key: the key path is never run as shell code" "PWNED created"
+    else
+        ok "key: the key path is never run as shell code"
+    fi
+    if [ "$(cat "$_t_sb/got" 2>/dev/null)" = "$_t_key" ]; then
+        ok "key: ssh gets the exact key path"
+    else
+        fail "key: ssh gets the exact key path" "got [$(cat "$_t_sb/got" 2>/dev/null)] want [$_t_key]"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # run everything
 # ---------------------------------------------------------------------------
@@ -1283,6 +1343,8 @@ test_start_reloads
 test_branch_remote_values
 test_control_characters
 test_subfolder_target
+test_private_files
+test_key_path_quoting
 test_sync_basic
 test_conflict
 test_network_error_not_conflict

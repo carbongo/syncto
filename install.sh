@@ -88,8 +88,10 @@ chmod +x "$BIN_PATH" 2>/dev/null || true
 echo "syncto: installed to $SHARE_DIR, linked at $BIN_PATH"
 
 mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR" "$HOME/.local/state/syncto" 2>/dev/null || true
+chmod 600 "$CONFIG_DIR/config" "$CONFIG_DIR/targets" 2>/dev/null || true
 if [ ! -f "$CONFIG_FILE" ]; then
-  cp "$script_dir/config.example" "$CONFIG_FILE"
+  (umask 077 && cp "$script_dir/config.example" "$CONFIG_FILE")
   echo "syncto: seeded $CONFIG_FILE"
 else
   echo "syncto: config already present at $CONFIG_FILE, leaving it alone"

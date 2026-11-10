@@ -66,7 +66,8 @@ log() {
     if [ -n "${LOG_FILE:-}" ]; then
         _lg_dir=$(dirname "$LOG_FILE")
         if [ ! -d "$_lg_dir" ]; then
-            mkdir -p "$_lg_dir" 2>/dev/null || :
+            # shellcheck disable=SC2174 # only the last folder needs to be private
+            mkdir -p -m 700 "$_lg_dir" 2>/dev/null || :
         fi
         printf '%s\n' "$_lg_line" >>"$LOG_FILE" 2>/dev/null || :
     fi
@@ -354,7 +355,10 @@ apply_ssh_env() {
         GIT_SSH_COMMAND=$1
         export GIT_SSH_COMMAND
     elif [ -n "$2" ]; then
-        GIT_SSH_COMMAND="ssh -i \"$2\" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
+        # git runs this through sh: single-quote the path so nothing in it expands.
+        _ak_q="'\\''"
+        _ak_key=${2//\'/$_ak_q}
+        GIT_SSH_COMMAND="ssh -i '$_ak_key' -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
         export GIT_SSH_COMMAND
     else
         unset GIT_SSH_COMMAND 2>/dev/null || :
@@ -1391,9 +1395,22 @@ cmd_status() {
     return 0
 }
 
+# secure_dirs: config and state hold hook commands and git output, so only the
+# owner may read them. Run by start; new installs create them private anyway.
+secure_dirs() {
+    for _sd in "$CONFIG_DIR" "$STATE_DIR"; do
+        [ -d "$_sd" ] && chmod 700 "$_sd" 2>/dev/null
+    done
+    for _sd in "$TARGETS_FILE" "$CONFIG_FILE"; do
+        [ -f "$_sd" ] && chmod 600 "$_sd" 2>/dev/null
+    done
+    return 0
+}
+
 ensure_targets_file() {
     if [ ! -f "$TARGETS_FILE" ]; then
-        mkdir -p "$CONFIG_DIR" || die 3 "cannot create $CONFIG_DIR"
+        # shellcheck disable=SC2174 # only the last folder needs to be private
+        [ -d "$CONFIG_DIR" ] || mkdir -p -m 700 "$CONFIG_DIR" || die 3 "cannot create $CONFIG_DIR"
         {
             printf '# syncto targets\n'
             printf '# NAME<TAB>PATH<TAB>OPTIONS   ($HOME is written as ~ so this file travels)\n'
@@ -2166,6 +2183,7 @@ uninstall_systemd() {
 }
 
 cmd_start() {
+    secure_dirs
     case "$(uname -s)" in
         Darwin) install_launchd ;;
         Linux) install_systemd ;;
@@ -2253,6 +2271,21 @@ parse_duration() {
 # opt_is_set OPTS KEY -> 0 if KEY is given explicitly in a target's options
 opt_is_set() {
     split_opts "$1" | grep -q "^$2="
+}
+
+# url_safe_r URL: REPLY is URL without user:password@, safe to show on screen.
+url_safe_r() {
+    REPLY=$1
+    case "$1" in
+        *://*@*)
+            _us_rest=${1#*://}
+            _us_auth=${_us_rest%%@*}
+            case "$_us_auth" in
+                */*) : ;;
+                *) REPLY="${1%%://*}://${_us_rest#*@}" ;;
+            esac
+            ;;
+    esac
 }
 
 dash_can_run() {
@@ -2607,6 +2640,8 @@ dash_add() {
     fi
     _da_url=""
     [ -n "$_da_remote" ] && _da_url=$(git -C "$_da_path" remote get-url "$_da_remote" 2>/dev/null || printf '')
+    url_safe_r "$_da_url"
+    _da_url=$REPLY
 
     dash_header "Add a repo" ""
     dash_add_line ""
@@ -2801,6 +2836,8 @@ dash_details() {
         _dt_path=$(tg_path "$_dt_i")
         dash_header "$_dt_name" "$L_C$L_SYM $H_TEXT$C_OFF"
         _dt_url=$(git -C "$_dt_path" remote get-url "$t_remote" 2>/dev/null || printf 'not set up')
+        url_safe_r "$_dt_url"
+        _dt_url=$REPLY
         case "$t_mode" in
             push) _dt_dir="push only, never pulls" ;;
             pull) _dt_dir="pull only, never commits" ;;
@@ -3013,6 +3050,8 @@ EOF
 # ---------------------------------------------------------------------------
 
 main() {
+    # shellcheck disable=SC2174 # only the last folder needs to be private
+    [ -d "$STATE_DIR" ] || mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || :
     load_config
     log_rotate_maybe
     setup_git_env
