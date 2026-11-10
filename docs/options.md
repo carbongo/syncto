@@ -8,7 +8,7 @@ Options are `key=value`, comma separated; `\,` is a literal comma. Set them per 
 | `interval=SECONDS` | minimum time between scheduled syncs | `120` |
 | `watch=on\|off` | sync within seconds of a file changing ([watch](watch.md)) | `off` |
 | `paused=on\|off` | skip in background syncing and plain `syncto sync`; `sync NAME` still runs | `off` |
-| `debounce=SECONDS` | quiet time a watcher waits before syncing | `2` |
+| `debounce=SECONDS` | with `watch=on`, how long after the last save to sync; each save restarts it | `2` |
 | `mode=sync\|push\|pull` | both ways, push only, pull only | `sync` |
 | `branch=NAME` | branch to pull and push; a plain name, no leading `-`, spaces or commas | `main` |
 | `remote=NAME` | remote to pull and push; same rule as `branch` | `origin` |

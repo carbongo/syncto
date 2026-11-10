@@ -1,7 +1,9 @@
 # Watch mode and syncing between machines
 
-`watch=on` syncs a repo `debounce` seconds after its files stop changing. `syncto start`
-runs the watch daemon for it; `syncto watch [NAME]` runs the same loop in the foreground.
+`watch=on` syncs a repo `debounce` seconds after its files stop changing. Each save
+restarts the wait, so typing into an editor that autosaves syncs once you pause, never
+mid-sentence; raise `debounce` (say `60`) for editors like that. `syncto start` runs the
+watch daemon; `syncto watch [NAME]` runs the same loop in the foreground.
 
 - Watcher, first one found: `fswatch`, `inotifywait` (inotify-tools), else a poll of
   `git status --porcelain`.

@@ -125,8 +125,8 @@ $(cat "$_targets_file" 2>/dev/null)"
         *) fail "list: shows added target" "$OUT" ;;
     esac
     case "$OUT" in
-        *"not synced yet"*"on save"*) ok "status: a new watched target is not synced yet, on save" ;;
-        *) fail "status: a new watched target is not synced yet, on save" "$OUT" ;;
+        *"not synced yet"*"2 s after save"*) ok "status: a watched target shows its wait after save" ;;
+        *) fail "status: a watched target shows its wait after save" "$OUT" ;;
     esac
     case "$OUT" in
         *"Background: off"*"syncto start"*) ok "status: says background is off and how to start it" ;;
