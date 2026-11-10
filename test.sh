@@ -415,6 +415,29 @@ test_auth_error_not_conflict() {
     esac
 }
 
+test_missing_remote() {
+    _t_sb=$(new_sandbox)
+    _t_work="$_t_sb/home/work"
+    mkdir -p "$_t_work"
+    git_q "$_t_work" init
+    git_q "$_t_work" checkout -B main
+    git_q "$_t_work" commit --allow-empty -m init
+    run_syncto "$_t_sb" add work "$_t_work" "branch=main,notify=touch $_t_sb/notified"
+    run_syncto "$_t_sb" sync work
+    assert_status "remote: a missing remote exits 3" 3 "$RC" "$OUT"
+    if [ -e "$_t_sb/notified" ]; then
+        fail "remote: a missing remote does not notify" "notify hook ran"
+    else
+        ok "remote: a missing remote does not notify"
+    fi
+    assert_log "remote: logged as error, not conflict" '*level=error*not found*' '*level=conflict*'
+    run_syncto "$_t_sb" status
+    case "$OUT" in
+        *"failing"*"remote 'origin' is missing"*"git remote add origin URL"*) ok "status: a missing remote says how to add it" ;;
+        *) fail "status: a missing remote says how to add it" "$OUT" ;;
+    esac
+}
+
 test_add_failure_logged() {
     fake_ssh_target "unused"
     printf 'x\n' >"$_t_work/new.txt"
@@ -1026,6 +1049,7 @@ test_closed_by_remote_host
 test_push_network_error
 test_auth_error_not_conflict
 test_add_failure_logged
+test_missing_remote
 test_locking
 test_guard
 test_stale_alarm

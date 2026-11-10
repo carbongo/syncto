@@ -601,6 +601,15 @@ is_transport_error() {
     return 1
 }
 
+# A remote that is not configured, or whose path is no repository: a setup
+# problem (exit 3), not a conflict.
+is_remote_missing() {
+    case "$1" in
+        *"does not appear to be a git repository"*|*"No such remote"*) return 0 ;;
+    esac
+    return 1
+}
+
 # Auth failures: an error, not a conflict; stale= reports them if they last.
 is_auth_error() {
     case "$1" in
@@ -778,6 +787,11 @@ sync_locked() {
             outcome "$name" offline "$_out"
             return 0
         fi
+        if [ "$_prc" -ne 0 ] && is_remote_missing "$_out"; then
+            git_in "$path" rebase --abort >/dev/null 2>&1 || :
+            outcome "$name" error "remote '$t_remote' not found: $_out"
+            return 3
+        fi
         if [ "$_prc" -ne 0 ] && is_auth_error "$_out"; then
             git_in "$path" rebase --abort >/dev/null 2>&1 || :
             outcome "$name" error "pull failed, authentication refused: $_out"
@@ -825,6 +839,10 @@ sync_locked() {
             if is_transport_error "$_out"; then
                 outcome "$name" offline "$_out"
                 return 0
+            fi
+            if is_remote_missing "$_out"; then
+                outcome "$name" error "remote '$t_remote' not found: $_out"
+                return 3
             fi
             outcome "$name" error "push failed ($_prc): $_out"
             return 1
@@ -1150,6 +1168,10 @@ target_health() {
         error)
             H_LEVEL=bad H_TEXT="failing"
             case "$_th_msg" in
+                *"remote '"*"' not found"*)
+                    H_DETAIL="the remote '$t_remote' is missing or not a git repository"
+                    H_FIX="$_th_cd && git remote -v, and if it is missing: git remote add $t_remote URL"
+                    ;;
                 *"authentication refused"*)
                     H_DETAIL="the remote refused the credentials"
                     H_FIX="check the ssh key (key= option) can push to $t_remote"
