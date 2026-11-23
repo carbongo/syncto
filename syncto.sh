@@ -4,7 +4,7 @@
 
 set -eu
 
-SYNCTO_VERSION="1.1.1"
+SYNCTO_VERSION="1.1.2"
 SYNCTO_LABEL="com.user.syncto"
 
 # ---------------------------------------------------------------------------
@@ -360,7 +360,7 @@ apply_ssh_env() {
         # git runs this through sh: single-quote the path so nothing in it expands.
         _ak_q="'\\''"
         _ak_key=${2//\'/$_ak_q}
-        GIT_SSH_COMMAND="ssh -i '$_ak_key' -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
+        GIT_SSH_COMMAND="ssh -i '$_ak_key' -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
         export GIT_SSH_COMMAND
     else
         unset GIT_SSH_COMMAND 2>/dev/null || :

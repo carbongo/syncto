@@ -16,6 +16,7 @@ due. Elsewhere, run `syncto run` from cron.
 launchd and systemd start syncs without an ssh-agent. A repo that pulls or pushes over
 ssh needs a passphrase-less key named with `key=PATH` (or `GIT_SSH_COMMAND=`), or its
 scheduled syncs fail while manual ones work. Prefer a deploy key limited to that repo.
+With `key=`, ssh gives up on a connection that stalls for a minute.
 
 ## macOS protected folders
 
